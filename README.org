@@ -1,0 +1,118 @@
+#+title: LispM ComfyUI
+
+#+HTML: <p align="center"><a href="https://github.com/LispMachineLab/lispm-comfyui/actions/workflows/test.yml"><img src="https://github.com/LispMachineLab/lispm-comfyui/actions/workflows/test.yml/badge.svg" alt="test" /></a></p>
+
+[[https://github.com/comfyanonymous/ComfyUI][ComfyUI]]'s workflows in Emacs: drawn as ComfyUI's own frontend draws them, nodes under their
+titles, inputs on the left, outputs on the right, widgets below, links curving between them in the
+colours of what they carry; edited and run from the keyboard, each node lit while it runs and the
+images it makes shown in it.  The workflows are those of a ComfyUI server's library, which its own
+frontend opens and saves too.  It is an application of [[https://github.com/LispMachineLab/lispm-desktop][LispM Desktop]], which its App Store installs,
+and works in any Emacs 30.1 or later that draws SVG.  In code, the prefix is ~lispm-comfyui-~.
+
+* What it needs
+
+- *A ComfyUI server*, at ~lispm-comfyui-url~, =http://127.0.0.1:8188= by default: ComfyUI's own
+  address.  A server on another machine of the network is reached where it listens, as through a
+  reverse proxy that passes WebSockets on; ~lispm-comfyui-headers~ adds what such a proxy asks
+  for, as a password.
+- *websocket*, Emacs's WebSocket client, from GNU ELPA, over which the server tells what it runs.
+  The App Store installs it, as package.el does.
+- *lispm-kit*, [[https://github.com/LispMachineLab/lispm-kit][LispM Kit]], with which the window declares each command once: its keys, its menu
+  item and, for the main ones, the words of a button.  The App Store installs it first.
+
+* Using it
+
+=M-x lispm-comfyui= opens the workflow last shown, or a new one; =o= opens one of the server's
+library.  A node is chosen, and one of its items: its title, an input, an output or a widget.
+
+| =←= =→= =↑= =↓=, =b= =f= =M-p= =M-n= | choose the nearest node the way they point                    |
+| =TAB= =S-TAB=                     | the next and the previous node, column by column               |
+| =j=, =/=                          | go to a node by its number or title                            |
+| =n= =p=                           | the next and the previous item of the node                     |
+| =RET=                             | set the widget, link the input or the output, or rename the node |
+| =e=                               | set a widget of the node, asked for by name                    |
+| =a=                               | add a node; on an output, one taking what it gives, linked to it; on an input, one giving what it takes |
+| =c=                               | link the socket chosen; on a widget, an output feeds it instead |
+| =k=                               | unlink the socket chosen                                       |
+| =t=                               | give the node a title                                          |
+| =D=                               | copy the node                                                  |
+| =B= =M=                           | bypass the node, mute it, or no longer                         |
+| =d=                               | delete the node                                                |
+| =M-←= =M-→= =M-↑= =M-↓=           | move the node                                                  |
+| =S-←= =S-→= =S-↑= =S-↓=           | look about                                                     |
+| =+= =-= =0=                       | draw larger, smaller, the whole workflow                       |
+| =u= =U=                           | undo and redo                                                  |
+| =r=, =C-c C-c=                    | run the workflow                                               |
+| =x=, =C-c C-k=                    | stop it                                                        |
+| =i=                               | show the image the node made in a window                       |
+| =s= =S=                           | save the workflow in the server's library, under another name |
+| =o= =O= =N=                       | open a workflow of the library, of a file, a new one          |
+| =g=                               | read the server's node types again                             |
+| =C-M-d= =>=, =C-M-u= =<=          | enter the subgraph of the node chosen, leave it                |
+| =m= =M-m=                         | mark the node chosen, or no longer; mark none                  |
+| =G=                               | make a subgraph of the nodes marked, or of the node chosen     |
+| =X=                               | put the nodes inside the subgraph's node chosen in its place   |
+| =C-u t=                           | on a subgraph's node, name the subgraph                        |
+
+The mouse chooses as the keys do: a node dragged moves, the canvas dragged looks about, the
+wheel scrolls and, with Control, zooms, as a touchpad's pinch does.  A double click does what
+=RET= does.
+
+A text of many lines is edited in a buffer of its own, =C-c C-c= setting it.  A choice of an
+image to load, as LoadImage's, offers to upload one of this machine's.  A seed changes after each
+run as its control says, randomized by default, as in ComfyUI.  A prompt's ={a|b}= is a choice
+made at random each run, as ComfyUI's dynamic prompts are; ~//~ and ~/* */~ are comments.
+
+* Subgraphs
+
+A subgraph is a graph of nodes made one node, as in ComfyUI.  =C-M-d= enters the subgraph of the
+node chosen, as =C-M-d= goes down into a list; inside, a node on the left stands for its inputs, one
+on the right for its outputs, linked to like any other, a link to /New input of the subgraph/ or
+/New output of the subgraph/ making one; =d= on one of them takes it away, =t= names it.  What
+changes inside changes in all the subgraph's nodes.  An input linked to a widget inside is a widget
+of the subgraph's nodes, each holding its own value.  =C-M-u= leaves.  =m= marks nodes and =G=
+makes a subgraph of them; =X= puts the nodes of a subgraph's node back in its place.
+
+* What runs
+
+The workflow is turned into the prompt ComfyUI's server runs as its frontend turns it: widgets
+named after their node type's inputs, links followed through reroutes and bypassed nodes, notes
+and muted nodes left out, the nodes inside subgraphs numbered with the path to them, as =12:5=,
+dynamic prompts chosen.  A workflow saved by an older frontend is read as the current one reads
+it: its subgraphs' proxyWidgets become inputs, nodes numbered twice are numbered anew.  The
+workflow goes with the prompt, so the images made keep it, as those made in ComfyUI's frontend
+do.
+
+The conversion was checked against ComfyUI's frontend itself, 1.53.6, which turned the 563
+workflow templates of its server and a library of 45 workflows into prompts: of their 7567
+nodes, 7466 come out the same.  The others are what the JavaScript of the frontend's extensions
+adds, as the 3D nodes' viewport and CustomCombo's options, which the server lets go, and a few
+nodes whose widgets the frontend itself mixes up.  Its dynamic prompts were checked against its
+own parser, the same choices made.
+
+What the frontend's extensions draw or do, the JavaScript of custom nodes, is not here: their
+nodes are drawn with their widgets as their types declare them.
+
+* LispM's agents
+
+With [[https://github.com/LispMachineLab/lispm-agent][LispM Agent]], its agents work on the workflow shown, with tools they find by searching for
+"comfyui": =comfyui_workflow= reads it, node by node; =comfyui_node_types= finds the server's
+node types and tells their inputs and outputs; =comfyui_edit= changes it, as the user would, all
+of a change or none of it, one step to undo, inside subgraphs too, and makes and unpacks them; =comfyui_run= runs it and gives the agent the images
+it made; =comfyui_open= and =comfyui_save= open and save the library's workflows.
+
+* Tests
+
+=make test compile= runs the tests and byte-compiles the files, warnings as errors.  No test
+speaks to a server: [[file:test/object-info.json][test/object-info.json]] holds what one says of a few node types, and
+[[file:test/workflow.json][test/workflow.json]] is ComfyUI's first workflow, with a reroute, a bypassed node and a note;
+subgraphs are made of it in the tests.
+websocket.el is found in package.el's directory, or named by ~WEBSOCKET~; LispM Kit is a checkout
+beside this one, or named by ~LISPM_KIT~.  With LispM Agent's =lisp/= beside this checkout, or
+named by ~LISPM_AGENT~, the tests of the agents' tools run too.
+
+* License
+
+Copyright (C) 2026 Ryan.K.  Free software under the GNU Affero General Public License, version 3
+or later (see [[file:LICENSE][LICENSE]]).  ComfyUI is comfyanonymous's, under the GNU GPL, version 3; this
+application speaks to its server, as its frontend does, and holds none of its code.
