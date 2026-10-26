@@ -59,6 +59,7 @@
 
 ;; An Emacs built without images, as one running tests, has none.
 (declare-function image-flush "image.c" (spec &optional frame))
+(declare-function image-size "image.c" (spec &optional pixels frame))
 
 (defcustom lispm-comfyui-dark t
   "Non-nil to draw workflows dark, as ComfyUI does; nil to follow Emacs's colours."
