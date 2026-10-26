@@ -53,8 +53,12 @@
 (require 'subr-x)
 (require 'lispm-kit-commands)
 (require 'lispm-comfyui-graph)
+(require 'lispm-comfyui-prompt)
 (require 'lispm-comfyui-client)
 (require 'lispm-comfyui-canvas)
+
+;; An Emacs built without images, as one running tests, has none.
+(declare-function image-flush "image.c" (spec &optional frame))
 
 (defcustom lispm-comfyui-dark t
   "Non-nil to draw workflows dark, as ComfyUI does; nil to follow Emacs's colours."
@@ -66,8 +70,23 @@
   :type 'string
   :group 'lispm-comfyui)
 
+(defvar-local lispm-comfyui--root nil
+  "The workflow this buffer shows.")
+
 (defvar-local lispm-comfyui--graph nil
-  "The graph this buffer shows.")
+  "The graph this buffer shows: the workflow, or the inside of a subgraph.")
+
+(defvar-local lispm-comfyui--path nil
+  "The numbers of the subgraphs' nodes entered, from the workflow in.")
+
+(defvar-local lispm-comfyui--marked nil
+  "The numbers of the nodes marked, to make a subgraph of.")
+
+(defvar-local lispm-comfyui--tick 0
+  "How many times the workflow changed, for what is made of it.")
+
+(defvar-local lispm-comfyui--types-cache nil
+  "The node types last made for the workflow: (SERVER ROOT TICK . TYPES).")
 
 (defvar-local lispm-comfyui--name nil
   "The name the graph is kept under in the server's library, or nil.")
@@ -85,7 +104,7 @@
   "The view: the canvas's point at the window's top left, and the scale.")
 
 (defvar-local lispm-comfyui--undo nil
-  "Graphs to go back to, the last first, each (GRAPH . SELECTED).")
+  "Workflows to go back to, the last first, each (WORKFLOW PATH SELECTED).")
 
 (defvar-local lispm-comfyui--redo nil
   "Graphs undone, to go forward to again.")
@@ -94,7 +113,8 @@
   "Where each node's items were last drawn, see `lispm-comfyui-canvas-layout'.")
 
 (defvar-local lispm-comfyui--images nil
-  "The images each node made, an alist from node numbers to files.")
+  "The images each node made, an alist from the nodes' numbers in the
+prompt, strings, 12:5 for one inside a subgraph, to files.")
 
 (defvar-local lispm-comfyui--runs nil
   "This buffer's runs, the last first, each a plist: :id, the prompt's;
@@ -103,7 +123,7 @@
 :message; :start; :callbacks, called with the run once over.")
 
 (defvar-local lispm-comfyui--executing nil
-  "The number of the node running, a string, or nil.")
+  "The number in the prompt of the node running, a string, or nil.")
 
 (defvar-local lispm-comfyui--progress nil
   "How far the node running is, (DONE . OF), or nil.")
@@ -112,7 +132,7 @@
   "The preview of the image being made, (NODE . FILE), or nil.")
 
 (defvar-local lispm-comfyui--errors nil
-  "What went wrong at each node, an alist from node numbers, strings.")
+  "What went wrong at each node, an alist from its number in the prompt.")
 
 (defvar-local lispm-comfyui--status nil
   "What is said of the server or the last run, or nil.")
@@ -135,8 +155,18 @@
 ;;;; The node types
 
 (defun lispm-comfyui--types ()
-  "The server's node types, or an empty table until they are read."
-  (or (lispm-comfyui-cached-types) (make-hash-table :test #'equal)))
+  "The node types of the server and of the workflow's subgraphs.
+An empty table until the server's are read."
+  (let ((server (or (lispm-comfyui-cached-types) (make-hash-table :test #'equal)))
+        (root (or lispm-comfyui--root lispm-comfyui--graph)))
+    (pcase lispm-comfyui--types-cache
+      ((and `(,cached-server ,cached-root ,tick . ,types)
+            (guard (and (eq cached-server server) (eq cached-root root)
+                        (eql tick lispm-comfyui--tick))))
+       types)
+      (_ (let ((types (if root (lispm-comfyui-graph-types root server) server)))
+           (setq lispm-comfyui--types-cache (cl-list* server root lispm-comfyui--tick types))
+           types)))))
 
 (defun lispm-comfyui--load-types (&optional again)
   "Read the server's node types, if not yet or AGAIN, and draw anew."
@@ -158,8 +188,55 @@
         (lispm-comfyui-types-of-server (lambda (types error) (setq done (or types t) failure error)))
         (with-timeout (60 (user-error "The server at %s did not answer" lispm-comfyui-url))
           (while (not done) (accept-process-output nil 0.05)))
-        (or (lispm-comfyui-cached-types)
-            (user-error "Cannot reach %s: %s" lispm-comfyui-url failure)))))
+        (unless (lispm-comfyui-cached-types)
+          (user-error "Cannot reach %s: %s" lispm-comfyui-url failure))))
+  (lispm-comfyui--types))
+
+;;;; The workflow and its subgraphs
+
+(defun lispm-comfyui--graph-at (root path)
+  "The graph inside the subgraphs of the nodes PATH, in ROOT, or nil."
+  (let ((graph root))
+    (dolist (id path graph)
+      (let* ((node (and graph (lispm-comfyui-node graph id)))
+             (subgraph (and node (lispm-comfyui-node-subgraph root node))))
+        (setq graph (and subgraph (lispm-comfyui-subgraph-graph subgraph)))))))
+
+(defun lispm-comfyui--set-root (root &optional path)
+  "Show ROOT, a workflow, inside the subgraphs of PATH if they are there."
+  (let ((graph (lispm-comfyui--graph-at root path)))
+    (setq lispm-comfyui--root root
+          lispm-comfyui--path (and graph path)
+          lispm-comfyui--graph (or graph root)
+          lispm-comfyui--marked nil)
+    (cl-incf lispm-comfyui--tick)))
+
+(defun lispm-comfyui--subgraph-shown ()
+  "The definition of the subgraph shown, or nil for the workflow."
+  (when lispm-comfyui--path
+    (let ((inside (lispm-comfyui--graph-at lispm-comfyui--root (butlast lispm-comfyui--path))))
+      (lispm-comfyui-node-subgraph
+       lispm-comfyui--root (lispm-comfyui-node inside (car (last lispm-comfyui--path)))))))
+
+(defun lispm-comfyui--io-nodes ()
+  "The nodes standing for the inputs and outputs of the subgraph shown."
+  (when-let* ((subgraph (lispm-comfyui--subgraph-shown)))
+    (list (lispm-comfyui-subgraph-io-node subgraph 'input)
+          (lispm-comfyui-subgraph-io-node subgraph 'output))))
+
+(defun lispm-comfyui--execution-key (id)
+  "The number in the prompt of the node numbered ID shown, a string."
+  (string-join (mapcar (lambda (part) (format "%s" part))
+                       (append lispm-comfyui--path (list id)))
+               ":"))
+
+(defun lispm-comfyui--local-id (key)
+  "The number, a string, of the node shown that KEY, a node's number in
+the prompt, is or is inside; nil if neither."
+  (let ((parts (split-string key ":"))
+        (path (mapcar (lambda (id) (format "%s" id)) lispm-comfyui--path)))
+    (when (and (> (length parts) (length path)) (equal (seq-take parts (length path)) path))
+      (nth (length path) parts))))
 
 ;;;; Drawing
 
@@ -240,11 +317,16 @@ as LoadImage's, which ComfyUI shows in it."
   "The image NODE, of TYPES, shows: (FILE WIDTH HEIGHT), or nil.
 The preview of what it is making, the last image it made, or the
 input image it loads."
-  (let* ((id (lispm-comfyui-node-id node))
+  (let* ((key (lispm-comfyui--execution-key (lispm-comfyui-node-id node)))
+         (inside (concat key ":"))
          (file (or (and lispm-comfyui--preview
-                        (equal (car lispm-comfyui--preview) (format "%s" id))
+                        (let ((of (format "%s" (car lispm-comfyui--preview))))
+                          (or (equal of key) (string-prefix-p inside of)))
                         (cdr lispm-comfyui--preview))
-                   (car (last (cdr (assoc id lispm-comfyui--images))))
+                   (car (last (cdr (assoc key lispm-comfyui--images))))
+                   ;; A subgraph's node shows the last image made inside.
+                   (car (last (cdr (seq-find (lambda (entry) (string-prefix-p inside (car entry)))
+                                             lispm-comfyui--images))))
                    (lispm-comfyui--input-image node types))))
     (when (and file (file-exists-p file))
       (let ((size (lispm-comfyui--image-size file)))
@@ -255,7 +337,8 @@ input image it loads."
   (let ((types (lispm-comfyui--types)))
     (setq lispm-comfyui--layout
           (lispm-comfyui-canvas-layout lispm-comfyui--graph types
-                                       (lambda (node) (lispm-comfyui--node-image node types))))))
+                                       (lambda (node) (lispm-comfyui--node-image node types))
+                                       (lispm-comfyui--io-nodes)))))
 
 (defun lispm-comfyui--window ()
   "The window showing this buffer, the selected one if it does."
@@ -276,8 +359,13 @@ input image it loads."
                  (list :graph lispm-comfyui--graph :types (lispm-comfyui--types)
                        :layout lispm-comfyui--layout :view lispm-comfyui--view
                        :selected lispm-comfyui--selected :focus lispm-comfyui--focus
-                       :executing lispm-comfyui--executing :progress lispm-comfyui--progress
-                       :errors lispm-comfyui--errors)
+                       :marked lispm-comfyui--marked
+                       :executing (and lispm-comfyui--executing
+                                       (lispm-comfyui--local-id lispm-comfyui--executing))
+                       :progress lispm-comfyui--progress
+                       :errors (cl-loop for (key . message) in lispm-comfyui--errors
+                                        for local = (lispm-comfyui--local-id key)
+                                        when local collect (cons local message)))
                  width height (lispm-comfyui--palette)))
            (image (create-image svg 'svg t :scale 1 :ascent 100
                                 :base-uri (expand-file-name "canvas.svg" lispm-comfyui-directory)))
@@ -318,7 +406,14 @@ input image it loads."
   (concat
    " " (propertize (or lispm-comfyui--name "Untitled") 'face 'bold)
    (if lispm-comfyui--modified " •" "")
+   (let ((graph lispm-comfyui--root) (crumbs ""))
+     (dolist (id lispm-comfyui--path crumbs)
+       (let* ((node (and graph (lispm-comfyui-node graph id)))
+              (subgraph (and node (lispm-comfyui-node-subgraph lispm-comfyui--root node))))
+         (setq crumbs (concat crumbs " › " (if subgraph (lispm-comfyui-subgraph-name subgraph) "?"))
+               graph (and subgraph (lispm-comfyui-subgraph-graph subgraph))))))
    (format "   %d nodes" (length (lispm-comfyui-graph-nodes lispm-comfyui--graph)))
+   (if lispm-comfyui--marked (format ", %d marked" (length lispm-comfyui--marked)) "")
    (cond (lispm-comfyui--status (concat "   " lispm-comfyui--status))
          ((> lispm-comfyui--queue-remaining 0)
           (format "   %d in the server's queue" lispm-comfyui--queue-remaining))
@@ -388,8 +483,15 @@ AROUND is the middle of the window by default."
 ;;;; Choosing
 
 (defun lispm-comfyui--node ()
-  "The node chosen, or nil."
-  (and lispm-comfyui--selected (lispm-comfyui-node lispm-comfyui--graph lispm-comfyui--selected)))
+  "The node chosen, or nil: one of the graph's, or a subgraph's inputs or outputs."
+  (and lispm-comfyui--selected
+       (or (lispm-comfyui-node lispm-comfyui--graph lispm-comfyui--selected)
+           (seq-find (lambda (node) (eql (lispm-comfyui-node-id node) lispm-comfyui--selected))
+                     (lispm-comfyui--io-nodes)))))
+
+(defun lispm-comfyui--io-p (node)
+  "Non-nil if NODE stands for a subgraph's inputs or outputs."
+  (and node (numberp (lispm-comfyui-node-id node)) (< (lispm-comfyui-node-id node) 0)))
 
 (defun lispm-comfyui--need-node ()
   "The node chosen; a user error if none is."
@@ -451,48 +553,57 @@ AROUND is the middle of the window by default."
 ;;;; Changing the graph
 
 (defun lispm-comfyui--remember ()
-  "Keep the graph as it is now, to undo to."
-  (push (cons (lispm-comfyui-graph-copy lispm-comfyui--graph) lispm-comfyui--selected)
+  "Keep the workflow as it is now, to undo to."
+  (push (list (lispm-comfyui-graph-copy lispm-comfyui--root) lispm-comfyui--path lispm-comfyui--selected)
         lispm-comfyui--undo)
   (when (> (length lispm-comfyui--undo) 200)
     (setq lispm-comfyui--undo (seq-take lispm-comfyui--undo 200)))
-  (setq lispm-comfyui--redo nil))
+  (setq lispm-comfyui--redo nil)
+  (cl-incf lispm-comfyui--tick))
 
 (defmacro lispm-comfyui--change (&rest body)
-  "Run BODY, which changes the graph, as one step to undo; draw anew.
-If BODY fails, the graph is as it was."
+  "Run BODY, which changes the workflow, as one step to undo; draw anew.
+If BODY fails, the workflow is as it was.  The subgraphs' nodes are
+made to have their subgraphs' inputs after."
   (declare (indent 0) (debug t))
   (let ((before (make-symbol "before"))
-        (selected (make-symbol "selected")))
-    `(let ((,before (lispm-comfyui-graph-copy lispm-comfyui--graph))
-           (,selected lispm-comfyui--selected))
+        (selected (make-symbol "selected"))
+        (path (make-symbol "path")))
+    `(let ((,before (lispm-comfyui-graph-copy lispm-comfyui--root))
+           (,selected lispm-comfyui--selected)
+           (,path lispm-comfyui--path))
        (condition-case err
            (prog1 (progn ,@body)
-             (push (cons ,before ,selected) lispm-comfyui--undo)
+             (lispm-comfyui-align-instances lispm-comfyui--root (lispm-comfyui-cached-types))
+             (push (list ,before ,path ,selected) lispm-comfyui--undo)
              (setq lispm-comfyui--redo nil
                    lispm-comfyui--modified t)
+             (cl-incf lispm-comfyui--tick)
              (lispm-comfyui--relayout)
              (lispm-comfyui--draw))
-         (error (setq lispm-comfyui--graph ,before)
+         (error (lispm-comfyui--set-root ,before ,path)
                 (signal (car err) (cdr err)))))))
 
+(defun lispm-comfyui--restore (step)
+  "Show the workflow of STEP, (WORKFLOW PATH SELECTED), as it was."
+  (pcase-let ((`(,root ,path ,selected) step))
+    (lispm-comfyui--set-root root path)
+    (setq lispm-comfyui--modified t)
+    (lispm-comfyui--select (and (lispm-comfyui-node lispm-comfyui--graph selected) selected))))
+
 (defun lispm-comfyui-undo ()
-  "Undo the last change to the graph."
+  "Undo the last change to the workflow."
   (interactive)
   (let ((step (or (pop lispm-comfyui--undo) (user-error "Nothing to undo"))))
-    (push (cons lispm-comfyui--graph lispm-comfyui--selected) lispm-comfyui--redo)
-    (setq lispm-comfyui--graph (car step)
-          lispm-comfyui--modified t)
-    (lispm-comfyui--select (and (lispm-comfyui-node lispm-comfyui--graph (cdr step)) (cdr step)))))
+    (push (list lispm-comfyui--root lispm-comfyui--path lispm-comfyui--selected) lispm-comfyui--redo)
+    (lispm-comfyui--restore step)))
 
 (defun lispm-comfyui-redo ()
   "Do again the change last undone."
   (interactive)
   (let ((step (or (pop lispm-comfyui--redo) (user-error "Nothing to redo"))))
-    (push (cons lispm-comfyui--graph lispm-comfyui--selected) lispm-comfyui--undo)
-    (setq lispm-comfyui--graph (car step)
-          lispm-comfyui--modified t)
-    (lispm-comfyui--select (and (lispm-comfyui-node lispm-comfyui--graph (cdr step)) (cdr step)))))
+    (push (list lispm-comfyui--root lispm-comfyui--path lispm-comfyui--selected) lispm-comfyui--undo)
+    (lispm-comfyui--restore step)))
 
 (defun lispm-comfyui--type-candidates (types &optional predicate)
   "Completion candidates for the node types of TYPES PREDICATE accepts.
@@ -542,15 +653,20 @@ it; on an input, one giving what it takes, linked from it."
          (type (and slot (if (eq kind 'input)
                              (lispm-comfyui-input-type from types (plist-get item :index))
                            (lispm-comfyui-slot-type slot))))
+         (around (lispm-comfyui--ancestors))
          (name (lispm-comfyui--read-type
                 types
                 (pcase kind
                   ('output (format "Add a node taking %s: " type))
                   ('input (format "Add a node giving %s: " type))
                   (_ "Add a node: "))
-                (pcase kind
-                  ('output (lambda (definition) (lispm-comfyui--accepts definition type)))
-                  ('input (lambda (definition) (lispm-comfyui--gives definition type)))))))
+                ;; Not a node of a subgraph it would be inside.
+                (lambda (definition)
+                  (and (not (member (alist-get 'name definition) around))
+                       (pcase kind
+                         ('output (lispm-comfyui--accepts definition type))
+                         ('input (lispm-comfyui--gives definition type))
+                         (_ t)))))))
     (lispm-comfyui--change
       (let ((node (lispm-comfyui-graph-add-node lispm-comfyui--graph types name)))
         (pcase kind
@@ -578,6 +694,16 @@ it; on an input, one giving what it takes, linked from it."
               lispm-comfyui--focus 0)))
     (lispm-comfyui--select lispm-comfyui--selected)))
 
+(defun lispm-comfyui--ancestors ()
+  "The types of the subgraphs' nodes entered: those the graph shown is inside."
+  (let ((graph lispm-comfyui--root) (types nil))
+    (dolist (id lispm-comfyui--path (nreverse types))
+      (let ((node (and graph (lispm-comfyui-node graph id))))
+        (when node
+          (push (lispm-comfyui-node-type node) types)
+          (setq graph (when-let* ((subgraph (lispm-comfyui-node-subgraph lispm-comfyui--root node)))
+                        (lispm-comfyui-subgraph-graph subgraph))))))))
+
 (defun lispm-comfyui--clear-place (node)
   "Move NODE down until it overlaps no other node, as each is drawn."
   (cl-loop repeat 200
@@ -592,9 +718,12 @@ it; on an input, one giving what it takes, linked from it."
                            lispm-comfyui--layout)
            do (cl-incf (lispm-comfyui-node-y node) 40)))
 
-(defun lispm-comfyui-delete-node ()
-  "Delete the node chosen, and its links."
+(cl-defun lispm-comfyui-delete-node ()
+  "Delete the node chosen, and its links.
+On an input or output of the subgraph shown, that input or output goes."
   (interactive)
+  (when (lispm-comfyui--io-p (lispm-comfyui--need-node))
+    (cl-return-from lispm-comfyui-delete-node (lispm-comfyui--remove-io-slot)))
   (let* ((node (lispm-comfyui--need-node))
          (place (lispm-comfyui-canvas-place lispm-comfyui--layout (lispm-comfyui-node-id node)))
          (origin (lispm-comfyui--centre place))
@@ -613,6 +742,7 @@ it; on an input, one giving what it takes, linked from it."
   (interactive)
   (let* ((node (lispm-comfyui--need-node))
          (types (lispm-comfyui--need-types)))
+    (when (lispm-comfyui--io-p node) (user-error "A subgraph's inputs and outputs are not copied"))
     (lispm-comfyui--change
       (let ((copy (lispm-comfyui-graph-add-node lispm-comfyui--graph types (lispm-comfyui-node-type node))))
         (setf (lispm-comfyui-node-values copy) (copy-tree (lispm-comfyui-node-values node) t)
@@ -751,21 +881,29 @@ it; on an input, one giving what it takes, linked from it."
 
 (defun lispm-comfyui--sources (types type exclude)
   "Candidates for linking into an input of TYPE: (TEXT NODE OUTPUT).
-Every output of TYPE of a node but EXCLUDE."
-  (cl-loop for node in (lispm-comfyui-graph-nodes lispm-comfyui--graph)
+Every output of TYPE of a node but EXCLUDE; inside a subgraph, its
+inputs too, and a new one, NODE then being :new."
+  (append
+   (cl-loop for node in (append (lispm-comfyui--io-nodes) (lispm-comfyui-graph-nodes lispm-comfyui--graph))
            unless (eq node exclude)
            append (cl-loop for slot in (lispm-comfyui-node-outputs node)
                            for index from 0
                            when (lispm-comfyui-types-match-p (lispm-comfyui-slot-type slot) type)
-                           collect (list (format "#%s %s › %s" (lispm-comfyui-node-id node)
-                                                 (lispm-comfyui-node-name node types)
-                                                 (lispm-comfyui-slot-name slot))
-                                         node index))))
+                           collect (list (if (lispm-comfyui--io-p node)
+                                             (format "Subgraph input › %s" (lispm-comfyui-slot-name slot))
+                                           (format "#%s %s › %s" (lispm-comfyui-node-id node)
+                                                   (lispm-comfyui-node-name node types)
+                                                   (lispm-comfyui-slot-name slot)))
+                                         node index)))
+   (when (and lispm-comfyui--path (not (lispm-comfyui--io-p exclude)))
+     (list (list "New input of the subgraph" :new nil)))))
 
 (defun lispm-comfyui--targets (types type exclude)
   "Candidates for linking an output of TYPE to: (TEXT NODE INPUT).
-Every input taking TYPE, a widget's too, of a node but EXCLUDE."
-  (cl-loop for node in (lispm-comfyui-graph-nodes lispm-comfyui--graph)
+Every input taking TYPE, a widget's too, of a node but EXCLUDE; inside a
+subgraph, its outputs too, and a new one, NODE then being :new."
+  (append
+   (cl-loop for node in (append (lispm-comfyui--io-nodes) (lispm-comfyui-graph-nodes lispm-comfyui--graph))
            unless (eq node exclude)
            append
            (let ((names nil))
@@ -774,8 +912,10 @@ Every input taking TYPE, a widget's too, of a node but EXCLUDE."
                        for index from 0
                        do (push (lispm-comfyui-slot-name slot) names)
                        when (lispm-comfyui-types-match-p type (lispm-comfyui-input-type node types index))
-                       collect (list (format "#%s %s › %s%s" (lispm-comfyui-node-id node)
-                                             (lispm-comfyui-node-name node types)
+                       collect (list (format "%s › %s%s"
+                                             (if (lispm-comfyui--io-p node) "Subgraph output"
+                                               (format "#%s %s" (lispm-comfyui-node-id node)
+                                                       (lispm-comfyui-node-name node types)))
                                              (lispm-comfyui-slot-name slot)
                                              (if (lispm-comfyui-input-link lispm-comfyui--graph node index)
                                                  "  (linked already)" ""))
@@ -788,7 +928,9 @@ Every input taking TYPE, a widget's too, of a node but EXCLUDE."
                        collect (list (format "#%s %s › %s" (lispm-comfyui-node-id node)
                                              (lispm-comfyui-node-name node types)
                                              (plist-get widget :name))
-                                     node (plist-get widget :name)))))))
+                                     node (plist-get widget :name))))))
+   (when (and lispm-comfyui--path (not (lispm-comfyui--io-p exclude)))
+     (list (list "New output of the subgraph" :new nil)))))
 
 (defun lispm-comfyui-connect ()
   "Link the item chosen: an input from an output, an output to an input.
@@ -809,7 +951,12 @@ On a widget, an output is linked to feed it instead of its value."
               (choice (assoc (completing-read (format "Link %s from: " name) candidates nil t)
                              candidates)))
          (lispm-comfyui--change
-           (lispm-comfyui-graph-connect lispm-comfyui--graph types (nth 1 choice) (nth 2 choice) node name))))
+           (if (eq (nth 1 choice) :new)
+               (let* ((subgraph (lispm-comfyui--subgraph-shown))
+                      (index (lispm-comfyui-subgraph-add-slot lispm-comfyui--root subgraph 'input name type)))
+                 (lispm-comfyui-graph-connect lispm-comfyui--graph types
+                                              (lispm-comfyui-subgraph-io-node subgraph 'input) index node name))
+             (lispm-comfyui-graph-connect lispm-comfyui--graph types (nth 1 choice) (nth 2 choice) node name)))))
       ('output
        (let* ((type (lispm-comfyui-slot-type (plist-get item :slot)))
               (candidates (or (lispm-comfyui--targets types type node)
@@ -819,8 +966,16 @@ On a widget, an output is linked to feed it instead of its value."
                                               candidates nil t)
                              candidates)))
          (lispm-comfyui--change
-           (lispm-comfyui-graph-connect lispm-comfyui--graph types node (plist-get item :index)
-                                  (nth 1 choice) (nth 2 choice)))))
+           (if (eq (nth 1 choice) :new)
+               (let* ((subgraph (lispm-comfyui--subgraph-shown))
+                      (index (lispm-comfyui-subgraph-add-slot
+                              lispm-comfyui--root subgraph 'output
+                              (lispm-comfyui-slot-name (plist-get item :slot)) type))
+                      (io (lispm-comfyui-subgraph-io-node subgraph 'output)))
+                 (lispm-comfyui-graph-connect lispm-comfyui--graph types node (plist-get item :index)
+                                              io (lispm-comfyui-slot-name (nth index (lispm-comfyui-node-inputs io)))))
+             (lispm-comfyui-graph-connect lispm-comfyui--graph types node (plist-get item :index)
+                                          (nth 1 choice) (nth 2 choice))))))
       (_ (user-error "Choose an input, an output or a widget to link (n and p)")))))
 
 (defun lispm-comfyui-disconnect ()
@@ -843,6 +998,19 @@ On a widget, an output is linked to feed it instead of its value."
                (lispm-comfyui-graph-disconnect lispm-comfyui--graph to (lispm-comfyui-link-to-slot link)))))))
       (_ (user-error "Choose an input or an output to unlink (n and p)")))))
 
+(defun lispm-comfyui--remove-io-slot ()
+  "Take from the subgraph shown the input or output chosen on its node."
+  (let* ((item (lispm-comfyui--item))
+         (subgraph (lispm-comfyui--subgraph-shown)))
+    (pcase (plist-get item :kind)
+      ('output (lispm-comfyui--change
+                 (lispm-comfyui-subgraph-remove-slot lispm-comfyui--root subgraph 'input
+                                                     (plist-get item :index))))
+      ('input (lispm-comfyui--change
+                (lispm-comfyui-subgraph-remove-slot lispm-comfyui--root subgraph 'output
+                                                    (plist-get item :index))))
+      (_ (user-error "Choose one of the subgraph's inputs or outputs to take away (n and p)")))))
+
 (defun lispm-comfyui-act ()
   "Do what the item chosen calls for.
 Set a widget's value; link an input or an output; rename the node on
@@ -854,17 +1022,51 @@ its title."
     ('title (lispm-comfyui-rename-node))
     (_ (lispm-comfyui--select-first))))
 
-(defun lispm-comfyui-rename-node ()
-  "Give the node chosen a title; an empty one gives back its type's name."
-  (interactive)
+(defun lispm-comfyui-rename-node (&optional subgraph)
+  "Give the node chosen a title; an empty one gives back its type's name.
+On a subgraph's input or output, name that.  With SUBGRAPH, the prefix
+argument, on a subgraph's node, name the subgraph, all its nodes'."
+  (interactive "P")
   (let* ((node (lispm-comfyui--need-node))
-         (title (read-string "Title: " (lispm-comfyui-node-name node (lispm-comfyui--types)))))
-    (lispm-comfyui--change
-      (setf (lispm-comfyui-node-title node) (if (string-blank-p title) nil title)))))
+         (item (lispm-comfyui--item))
+         (definition (lispm-comfyui-node-subgraph lispm-comfyui--root node)))
+    (cond
+     ((lispm-comfyui--io-p node)
+      (let ((which (pcase (plist-get item :kind)
+                     ('output 'input) ('input 'output)
+                     (_ (user-error "Choose one of the subgraph's inputs or outputs to name (n and p)")))))
+        (let ((name (read-string "Name: " (lispm-comfyui-slot-name (plist-get item :slot)))))
+          (when (string-blank-p name) (user-error "A name is needed"))
+          (lispm-comfyui--change
+            (lispm-comfyui-subgraph-rename-slot lispm-comfyui--root (lispm-comfyui--subgraph-shown)
+                                                which (plist-get item :index) name)))))
+     ((and subgraph definition)
+      (let ((name (read-string "Name of the subgraph: " (lispm-comfyui-subgraph-name definition))))
+        (when (string-blank-p name) (user-error "A name is needed"))
+        (lispm-comfyui--change (setf (lispm-comfyui-subgraph-name definition) name))))
+     (t
+      (let ((title (read-string "Title: " (lispm-comfyui-node-name node (lispm-comfyui--types)))))
+        (lispm-comfyui--change
+          (setf (lispm-comfyui-node-title node) (if (string-blank-p title) nil title))))))))
+
+(defun lispm-comfyui--place-io (node x y)
+  "Put NODE, a subgraph's inputs' or outputs', at X Y, its body's top left."
+  (let* ((subgraph (lispm-comfyui--subgraph-shown))
+         (input (eql (lispm-comfyui-node-id node) lispm-comfyui-input-node))
+         (saved (if input (lispm-comfyui-subgraph-input-node subgraph)
+                  (lispm-comfyui-subgraph-output-node subgraph)))
+         (bounding (copy-sequence (or (alist-get 'bounding saved) (vector 0 0 160 60)))))
+    (aset bounding 0 x)
+    (aset bounding 1 (- y 30))
+    (setf (alist-get 'bounding saved) bounding)
+    (if input (setf (lispm-comfyui-subgraph-input-node subgraph) saved)
+      (setf (lispm-comfyui-subgraph-output-node subgraph) saved))
+    (setf (lispm-comfyui-node-x node) x (lispm-comfyui-node-y node) y)))
 
 (defun lispm-comfyui--toggle-mode (mode)
   "Make the node chosen of MODE, or run again if it is already."
   (let ((node (lispm-comfyui--need-node)))
+    (when (lispm-comfyui--io-p node) (user-error "A subgraph's inputs and outputs always run"))
     (lispm-comfyui--change
       (setf (lispm-comfyui-node-mode node) (if (eql (lispm-comfyui-node-mode node) mode) 0 mode)))))
 
@@ -885,8 +1087,10 @@ its title."
         (setq lispm-comfyui--modified t)
       (lispm-comfyui--remember)
       (setq lispm-comfyui--modified t))
-    (cl-incf (lispm-comfyui-node-x node) dx)
-    (cl-incf (lispm-comfyui-node-y node) dy)
+    (if (lispm-comfyui--io-p node)
+        (lispm-comfyui--place-io node (+ (lispm-comfyui-node-x node) dx) (+ (lispm-comfyui-node-y node) dy))
+      (cl-incf (lispm-comfyui-node-x node) dx)
+      (cl-incf (lispm-comfyui-node-y node) dy))
     (lispm-comfyui--relayout)
     (lispm-comfyui--show-selected)
     (lispm-comfyui--draw)))
@@ -990,7 +1194,9 @@ its title."
          (start (posn-x-y (event-start event)))
          (point (lispm-comfyui--event-point event))
          (hit (and point (lispm-comfyui-canvas-hit lispm-comfyui--layout (car point) (cdr point))))
-         (node (and hit (lispm-comfyui-node lispm-comfyui--graph (car hit))))
+         (node (and hit (or (lispm-comfyui-node lispm-comfyui--graph (car hit))
+                            (seq-find (lambda (node) (eql (lispm-comfyui-node-id node) (car hit)))
+                                      (lispm-comfyui--io-nodes)))))
          (origin (and node (cons (lispm-comfyui-node-x node) (lispm-comfyui-node-y node))))
          (view lispm-comfyui--view)
          (moved nil) (last nil))
@@ -1008,9 +1214,12 @@ its title."
               (unless (or moved (null node)) (lispm-comfyui--remember))
               (setq moved t)
               (if node
-                  (setf (lispm-comfyui-node-x node) (round (+ (car origin) dx))
-                        (lispm-comfyui-node-y node) (round (+ (cdr origin) dy))
-                        lispm-comfyui--modified t)
+                  (progn
+                    (if (lispm-comfyui--io-p node)
+                        (lispm-comfyui--place-io node (round (+ (car origin) dx)) (round (+ (cdr origin) dy)))
+                      (setf (lispm-comfyui-node-x node) (round (+ (car origin) dx))
+                            (lispm-comfyui-node-y node) (round (+ (cdr origin) dy))))
+                    (setq lispm-comfyui--modified t))
                 (setq lispm-comfyui--view (list (- (car view) dx) (- (cadr view) dy) (nth 2 view))))
               (lispm-comfyui--draw))))))
     (unless (memq (event-basic-type last) '(mouse-1))
@@ -1109,7 +1318,7 @@ its title."
 (defun lispm-comfyui--take-images (run node images)
   "Fetch IMAGES NODE made in RUN, of this buffer, and show them in it."
   (let ((buffer (current-buffer))
-        (node (if (stringp node) (string-to-number node) node))
+        (node (format "%s" node))
         (first t))
     (seq-doseq (image images)
       (when (and (consp image) (alist-get 'filename image)
@@ -1123,8 +1332,9 @@ its title."
                (plist-put run :pending (1- (plist-get run :pending)))
                (when file
                  (plist-put run :files (append (plist-get run :files) (list file)))
-                 (setf (alist-get node lispm-comfyui--images)
-                       (append (and (not first) (alist-get node lispm-comfyui--images)) (list file)))
+                 (setf (alist-get node lispm-comfyui--images nil nil #'equal)
+                       (append (and (not first) (alist-get node lispm-comfyui--images nil nil #'equal))
+                               (list file)))
                  (setq first nil)
                  (lispm-comfyui--draw-soon))
                (lispm-comfyui--call-back run)))))))))
@@ -1162,11 +1372,7 @@ its title."
                       (setq lispm-comfyui--executing node
                             lispm-comfyui--progress nil
                             lispm-comfyui--status
-                            (format "Running %s"
-                                    (if-let* ((it (lispm-comfyui-node lispm-comfyui--graph
-                                                                      (string-to-number node))))
-                                        (lispm-comfyui-node-name it (lispm-comfyui--types))
-                                      (concat "#" node)))))
+                            (format "Running %s" (lispm-comfyui--execution-name node))))
                   (lispm-comfyui--finish run 'done))))
              ("progress"
               (setq lispm-comfyui--progress (cons (alist-get 'value data) (alist-get 'max data)))
@@ -1224,6 +1430,15 @@ its title."
            (let ((status (alist-get 'status_str (alist-get 'status entry))))
              (lispm-comfyui--finish run (if (equal status "error") 'failed 'done)))))))))
 
+(defun lispm-comfyui--execution-name (key)
+  "What the node numbered KEY in the prompt, as 12:5, is called."
+  (let ((graph lispm-comfyui--root) (node nil))
+    (dolist (part (split-string key ":"))
+      (setq node (and graph (lispm-comfyui-node graph (string-to-number part)))
+            graph (when-let* ((subgraph (and node (lispm-comfyui-node-subgraph lispm-comfyui--root node))))
+                    (lispm-comfyui-subgraph-graph subgraph))))
+    (if node (lispm-comfyui-node-name node (lispm-comfyui--types)) (concat "#" key))))
+
 (defun lispm-comfyui--node-errors (answer)
   "What the server said was wrong with each node, in ANSWER to a prompt.
 An alist from node numbers, strings, to messages."
@@ -1242,8 +1457,18 @@ CALLBACK, if given, is called with the run once it is over, a plist
 as `lispm-comfyui--runs' holds."
   (interactive)
   (let* ((types (lispm-comfyui--need-types))
-         (prompt (condition-case err (lispm-comfyui-prompt lispm-comfyui--graph types)
+         (resolved (make-hash-table))
+         (prompt (condition-case err (lispm-comfyui-prompt lispm-comfyui--root types resolved)
                    (lispm-comfyui-error (user-error "%s" (cadr err)))))
+         ;; The workflow kept with the images holds the texts dynamic
+         ;; prompts became, as the frontend keeps them.
+         (workflow (let ((copy (lispm-comfyui-graph-copy lispm-comfyui--root)))
+                     (maphash (lambda (id texts)
+                                (when-let* ((node (lispm-comfyui-node copy id)))
+                                  (pcase-dolist (`(,name . ,text) texts)
+                                    (ignore-errors (lispm-comfyui-set-widget node types name text)))))
+                              resolved)
+                     (lispm-comfyui-graph-json copy)))
          (buffer (current-buffer)))
     (unless prompt (user-error "The workflow has no node that runs"))
     (lispm-comfyui-connect-socket)
@@ -1251,7 +1476,7 @@ as `lispm-comfyui--runs' holds."
           lispm-comfyui--status "Queueing…")
     (lispm-comfyui--draw-soon)
     (lispm-comfyui-queue
-     prompt (lispm-comfyui-graph-json lispm-comfyui--graph)
+     prompt workflow
      (lambda (answer error)
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
@@ -1270,9 +1495,12 @@ as `lispm-comfyui--runs' holds."
                ;; Seeds and the like change after each run, as the
                ;; frontend changes them.
                (let ((changed nil))
-                 (dolist (node (lispm-comfyui-graph-nodes lispm-comfyui--graph))
-                   (when (lispm-comfyui-after-run node types) (setq changed t)))
-                 (when changed (setq lispm-comfyui--modified t)))
+                 (dolist (graph (lispm-comfyui--graphs lispm-comfyui--root))
+                   (dolist (node (lispm-comfyui-graph-nodes graph))
+                     (when (lispm-comfyui-after-run node types) (setq changed t))))
+                 (when changed
+                   (setq lispm-comfyui--modified t)
+                   (cl-incf lispm-comfyui--tick)))
                (lispm-comfyui--draw-soon)))))))))
 
 (defun lispm-comfyui-stop ()
@@ -1292,7 +1520,8 @@ as `lispm-comfyui--runs' holds."
   "Show the image the node chosen made, or the last any made, in a window."
   (interactive)
   (let* ((node (lispm-comfyui--node))
-         (files (or (and node (alist-get (lispm-comfyui-node-id node) lispm-comfyui--images))
+         (files (or (and node (cdr (assoc (lispm-comfyui--execution-key (lispm-comfyui-node-id node))
+                                          lispm-comfyui--images)))
                     (plist-get (car lispm-comfyui--runs) :files)
                     (user-error "No image yet: r runs the workflow"))))
     (display-buffer (find-file-noselect (car (last files))))))
@@ -1307,14 +1536,18 @@ as `lispm-comfyui--runs' holds."
   "Show GRAPH, the workflow NAME, in a buffer; return the buffer."
   (let ((buffer (if (and (derived-mode-p 'lispm-comfyui-mode)
                          (not lispm-comfyui--modified) (null lispm-comfyui--name)
-                         (null (lispm-comfyui-graph-nodes lispm-comfyui--graph)))
+                         (null (lispm-comfyui-graph-nodes lispm-comfyui--root)))
                     (current-buffer)
                   (or (and name (get-buffer (lispm-comfyui--buffer-name name)))
                       (generate-new-buffer (lispm-comfyui--buffer-name name))))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'lispm-comfyui-mode) (lispm-comfyui-mode))
-      (setq lispm-comfyui--graph graph
-            lispm-comfyui--name name
+      (when (and lispm-comfyui--modified (lispm-comfyui-graph-nodes lispm-comfyui--root)
+                 (not (yes-or-no-p (format "The workflow %s has changes not saved; let them go? "
+                                           (or lispm-comfyui--name "Untitled")))))
+        (user-error "Kept as it was"))
+      (lispm-comfyui--set-root graph)
+      (setq lispm-comfyui--name name
             lispm-comfyui--modified nil
             lispm-comfyui--undo nil lispm-comfyui--redo nil
             lispm-comfyui--images nil lispm-comfyui--errors nil
@@ -1341,7 +1574,7 @@ as `lispm-comfyui--runs' holds."
     (with-timeout (30 (user-error "The server at %s did not answer" lispm-comfyui-url))
       (while (not json) (accept-process-output nil 0.05)))
     (when failure (user-error "Cannot read %s: %s" name failure))
-    (lispm-comfyui--show (lispm-comfyui-graph-from-json json) name)))
+    (lispm-comfyui--show (lispm-comfyui-graph-from-json json (lispm-comfyui-cached-types)) name)))
 
 (defun lispm-comfyui-open-file (file)
   "Open the workflow in FILE, saved by ComfyUI, or a prompt in its API's form."
@@ -1351,7 +1584,8 @@ as `lispm-comfyui--runs' holds."
                  (goto-char (point-min))
                  (json-parse-buffer :object-type 'alist)))
          (graph (if (assq 'nodes json)
-                    (lispm-comfyui-graph-from-json json)
+                    (progn (lispm-comfyui--need-types)
+                           (lispm-comfyui-graph-from-json json (lispm-comfyui-cached-types)))
                   (lispm-comfyui-graph-from-prompt json (lispm-comfyui--need-types)))))
     (with-current-buffer (lispm-comfyui--show graph nil)
       (setq lispm-comfyui--modified t))))
@@ -1371,16 +1605,16 @@ Without a name, it is asked for the first time."
                      name)))
          (name (if (string-suffix-p ".json" name) name (concat name ".json")))
          (buffer (current-buffer))
-         (graph lispm-comfyui--graph))
+         (tick lispm-comfyui--tick))
     (lispm-comfyui-write-workflow
-     name (lispm-comfyui-graph-string graph)
+     name (lispm-comfyui-graph-string lispm-comfyui--root)
      (lambda (_answer error)
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
            (if error
                (message "Cannot save %s: %s" name error)
              (setq lispm-comfyui--name name
-                   lispm-comfyui--modified (not (eq graph lispm-comfyui--graph)))
+                   lispm-comfyui--modified (/= tick lispm-comfyui--tick))
              (rename-buffer (lispm-comfyui--buffer-name name) t)
              (force-mode-line-update)
              (message "Saved %s" name))))))))
@@ -1400,6 +1634,88 @@ Without a name, it is asked for the first time."
   (lispm-comfyui--draw))
 
 (defun lispm-comfyui--modified-p () "Non-nil if the workflow changed." lispm-comfyui--modified)
+
+;;;; Subgraphs
+
+(defun lispm-comfyui-enter-subgraph ()
+  "Show the inside of the subgraph of the node chosen, to change it.
+What changes there changes in all its subgraph's nodes."
+  (interactive)
+  (let ((node (lispm-comfyui--need-node)))
+    (unless (lispm-comfyui-node-subgraph lispm-comfyui--root node)
+      (user-error "Not a subgraph's node"))
+    (setq lispm-comfyui--path (append lispm-comfyui--path (list (lispm-comfyui-node-id node)))
+          lispm-comfyui--graph (lispm-comfyui--graph-at lispm-comfyui--root lispm-comfyui--path)
+          lispm-comfyui--marked nil
+          lispm-comfyui--selected nil
+          lispm-comfyui--focus 0)
+    (lispm-comfyui--fit)
+    (lispm-comfyui--draw)))
+
+(defun lispm-comfyui-leave-subgraph ()
+  "Show what the subgraph shown is inside, its node chosen."
+  (interactive)
+  (unless lispm-comfyui--path (user-error "Not inside a subgraph"))
+  (let ((id (car (last lispm-comfyui--path))))
+    (setq lispm-comfyui--path (butlast lispm-comfyui--path)
+          lispm-comfyui--graph (lispm-comfyui--graph-at lispm-comfyui--root lispm-comfyui--path)
+          lispm-comfyui--marked nil)
+    (lispm-comfyui--fit)
+    (lispm-comfyui--select id)))
+
+(defun lispm-comfyui-mark ()
+  "Mark the node chosen, or no longer, to make a subgraph of the nodes marked."
+  (interactive)
+  (let ((node (lispm-comfyui--need-node)))
+    (when (lispm-comfyui--io-p node) (user-error "A subgraph's inputs and outputs are not marked"))
+    (let ((id (lispm-comfyui-node-id node)))
+      (setq lispm-comfyui--marked (if (member id lispm-comfyui--marked)
+                                      (delete id lispm-comfyui--marked)
+                                    (cons id lispm-comfyui--marked))))
+    (lispm-comfyui--draw)))
+
+(defun lispm-comfyui-unmark-all ()
+  "Mark no node."
+  (interactive)
+  (setq lispm-comfyui--marked nil)
+  (lispm-comfyui--draw))
+
+(defun lispm-comfyui-make-subgraph (name)
+  "Make a subgraph, NAME, of the nodes marked, or of the node chosen.
+A node of it takes their place, linked as they were."
+  (interactive (list (read-string "Name of the subgraph: " nil nil "New Subgraph")))
+  (let* ((types (lispm-comfyui--need-types))
+         (nodes (or (delq nil (mapcar (lambda (id) (lispm-comfyui-node lispm-comfyui--graph id))
+                                      lispm-comfyui--marked))
+                    (let ((node (lispm-comfyui--need-node)))
+                      (when (lispm-comfyui--io-p node) (user-error "Choose or mark the nodes"))
+                      (list node)))))
+    (ignore types)
+    (lispm-comfyui--change
+      (let ((node (lispm-comfyui-graph-convert-to-subgraph
+                   lispm-comfyui--graph (lispm-comfyui-cached-types) nodes name)))
+        (setq lispm-comfyui--marked nil
+              lispm-comfyui--selected (lispm-comfyui-node-id node)
+              lispm-comfyui--focus 0)))
+    (lispm-comfyui--select lispm-comfyui--selected)))
+
+(defun lispm-comfyui-unpack-subgraph ()
+  "Put the nodes inside the subgraph's node chosen in its place."
+  (interactive)
+  (let ((node (lispm-comfyui--need-node)))
+    (unless (lispm-comfyui-node-subgraph lispm-comfyui--root node)
+      (user-error "Not a subgraph's node"))
+    (lispm-comfyui--need-types)
+    (lispm-comfyui--change
+      (let ((nodes (lispm-comfyui-graph-unpack lispm-comfyui--graph (lispm-comfyui-cached-types) node)))
+        (setq lispm-comfyui--selected (and nodes (lispm-comfyui-node-id (car nodes)))
+              lispm-comfyui--focus 0)))
+    (lispm-comfyui--select lispm-comfyui--selected)))
+
+(defun lispm-comfyui--subgraph-node-p ()
+  "Non-nil if the node chosen is a subgraph's."
+  (when-let* ((node (lispm-comfyui--node)))
+    (lispm-comfyui-node-subgraph lispm-comfyui--root node)))
 (defun lispm-comfyui--running-p ()
   "Non-nil while a run of this workflow is queued or running."
   (seq-find (lambda (run) (memq (plist-get run :status) '(queued running))) lispm-comfyui--runs))
@@ -1475,6 +1791,20 @@ Without a name, it is asked for the first time."
                       :enabled (lispm-comfyui--chosen-p))
   (lispm-comfyui-delete-node :key ("d" "<delete>" "<deletechar>") :help "Delete the node"
                              :label "Delete Node" :enabled (lispm-comfyui--chosen-p))
+  :menu "Subgraph"
+  (lispm-comfyui-enter-subgraph :key ("C-M-d" ">") :help "Show the inside of the subgraph's node"
+                                :label "Enter Subgraph" :enabled (lispm-comfyui--subgraph-node-p))
+  (lispm-comfyui-leave-subgraph :key ("C-M-u" "<" "^") :help "Show what the subgraph is inside"
+                                :label "Leave Subgraph" :enabled lispm-comfyui--path)
+  "---"
+  (lispm-comfyui-mark :key "m" :help "Mark the node, or no longer" :label "Mark Node"
+                      :enabled (lispm-comfyui--chosen-p))
+  (lispm-comfyui-unmark-all :key "M-m" :help "Mark no node" :label "Unmark All"
+                            :enabled lispm-comfyui--marked)
+  (lispm-comfyui-make-subgraph :key "G" :help "Make a subgraph of the nodes marked"
+                               :label "Make Subgraph…" :enabled (lispm-comfyui--chosen-p))
+  (lispm-comfyui-unpack-subgraph :key "X" :help "Put the nodes inside the subgraph in its place"
+                                 :label "Unpack Subgraph" :enabled (lispm-comfyui--subgraph-node-p))
   :menu "View"
   (lispm-comfyui-go-to-node :key ("j" "/") :help "Go to a node by its title" :label "Go to Node…")
   (lispm-comfyui-next-node :key "TAB" :help "Choose the next node" :label "Next Node")
@@ -1492,7 +1822,9 @@ The arrow keys go from node to node; n and p from item to item of the
 node chosen, its inputs, outputs and widgets; RET does what the item
 calls for.
 \\{lispm-comfyui-mode-map}"
-  (setq-local lispm-comfyui--graph (lispm-comfyui-graph-create))
+  (let ((graph (lispm-comfyui-graph-create)))
+    (setq-local lispm-comfyui--root graph
+                lispm-comfyui--graph graph))
   (setq buffer-read-only t
         truncate-lines t
         cursor-type nil)
@@ -1520,7 +1852,7 @@ calls for.
 (defun lispm-comfyui--may-kill ()
   "Non-nil if this buffer may go: its workflow saved, or let go."
   (or (not lispm-comfyui--modified)
-      (null (lispm-comfyui-graph-nodes lispm-comfyui--graph))
+      (null (lispm-comfyui-graph-nodes lispm-comfyui--root))
       (yes-or-no-p (format "The workflow %s changed since it was saved; close it anyway? "
                            (or lispm-comfyui--name "Untitled")))))
 

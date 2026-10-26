@@ -237,15 +237,16 @@ alists from indexes to (X . Y)."
         (list :node node :x x :y y :w w :h (max row (+ (- top y) pad)) :items (nreverse items)
               :inputs input-places :outputs output-places :image picture)))))
 
-(defun lispm-comfyui-canvas-layout (graph types &optional images)
+(defun lispm-comfyui-canvas-layout (graph types &optional images extra)
   "Where what each node of GRAPH, of TYPES, shows is.
 IMAGES is a function of a node returning the image it shows, (FILE
-WIDTH HEIGHT), or nil.  Returns a list of plists, one a node, as
-`lispm-comfyui-canvas--node-layout' makes them, in GRAPH's order."
+WIDTH HEIGHT), or nil.  EXTRA are nodes drawn besides GRAPH's, below
+them, as a subgraph's inputs and outputs.  Returns a list of plists,
+one a node, as `lispm-comfyui-canvas--node-layout' makes them."
   (mapcar (lambda (node)
             (lispm-comfyui-canvas--node-layout graph types node
                                                (and images (funcall images node))))
-          (lispm-comfyui-graph-nodes graph)))
+          (append extra (lispm-comfyui-graph-nodes graph))))
 
 (defun lispm-comfyui-canvas-place (layout id)
   "The place in LAYOUT of the node numbered ID."
@@ -398,6 +399,9 @@ STATE is a plist of what the canvas shows besides the graph, as
          (w (plist-get place :w)) (h (plist-get place :h))
          (title-height lispm-comfyui-canvas-title-height)
          (selected (equal id (plist-get state :selected)))
+         (marked (member id (plist-get state :marked)))
+         (subgraph (alist-get 'lispm-subgraph (gethash (lispm-comfyui-node-type node) types)))
+         (io (and (numberp id) (< id 0)))
          (running (equal (format "%s" id) (plist-get state :executing)))
          (failure (cdr (assoc (format "%s" id) (plist-get state :errors))))
          (mode (lispm-comfyui-node-mode node))
@@ -405,9 +409,11 @@ STATE is a plist of what the canvas shows besides the graph, as
          (border (cond (failure (plist-get palette :error))
                        (running (plist-get palette :run))
                        (selected (plist-get palette :select))
+                       (marked (plist-get palette :focus))
                        (t (plist-get palette :border))))
          (body (cond ((eql mode 4) (plist-get palette :bypass))
                      (note "#3a3520")
+                     (io (plist-get palette :title))
                      (t (plist-get palette :node))))
          (top (- y title-height)))
     (concat
@@ -423,8 +429,10 @@ STATE is a plist of what the canvas shows besides the graph, as
                    (t (plist-get palette :dim))))
      (lispm-comfyui-canvas--text
       (+ x 26) (- y (/ title-height 2.0) (* -0.35 lispm-comfyui-canvas-text-size))
-      (lispm-comfyui-canvas--fit (concat (lispm-comfyui-node-name node types)
-                                         (pcase mode (4 "  (bypassed)") (2 "  (muted)") (_ "")))
+      (lispm-comfyui-canvas--fit (concat (if subgraph "▸ " "")
+                                         (lispm-comfyui-node-name node types)
+                                         (pcase mode (4 "  (bypassed)") (2 "  (muted)") (_ ""))
+                                         (if marked "  ✓" ""))
                                  (- w 36))
       :fill (plist-get palette :text) :font-size lispm-comfyui-canvas-text-size
       :font-weight "bold")
@@ -447,7 +455,7 @@ STATE is a plist of what the canvas shows besides the graph, as
                  (plist-get palette :run))
        "")
      (format "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" rx=\"8\" fill=\"none\" stroke=\"%s\" stroke-width=\"%s\"/>"
-             x top w (+ title-height h) border (if (or selected running failure) 2.5 1))
+             x top w (+ title-height h) border (if (or selected running failure marked) 2.5 1))
      (if failure
          (cl-loop for line in (lispm-comfyui-canvas--wrap failure w 3)
                   for top from (+ y h 18) by 16
@@ -464,7 +472,8 @@ the canvas's point at the top left and how many pixels a unit of the
 canvas is; :selected, the node chosen, and :focus, the index of its
 item chosen; :executing, the number of the node running, a string;
 :progress, (DONE . OF) for it; and :errors, an alist from node
-numbers, strings, to what went wrong there.  PALETTE is a plist of
+numbers, strings, to what went wrong there; :marked, the numbers of the
+nodes marked.  PALETTE is a plist of
 colours and :font, `lispm-comfyui-canvas-palette' by default."
   (let* ((palette (or palette lispm-comfyui-canvas-palette))
          (graph (plist-get state :graph))

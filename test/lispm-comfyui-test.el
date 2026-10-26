@@ -68,7 +68,7 @@ Whole numbers are integers, as JSON does not tell 8 from 8.0."
      (puthash "http://comfy.test:8188" (lispm-comfyui-test--types) lispm-comfyui--types)
      (with-temp-buffer
        (lispm-comfyui-mode)
-       (setq lispm-comfyui--graph (lispm-comfyui-test--graph))
+       (lispm-comfyui--set-root (lispm-comfyui-test--graph))
        (lispm-comfyui--relayout)
        ,@body)))
 
@@ -349,7 +349,7 @@ Through the reroute and the bypassed node; the note does not run."
              "executed" `((node . "9") (prompt_id . "p1")
                           (output . ((images . [((filename . "ComfyUI_00001_.png") (subfolder . "")
                                                  (type . "output"))])))))
-            (should (equal (alist-get 9 lispm-comfyui--images) (list image)))
+            (should (equal (cdr (assoc "9" lispm-comfyui--images)) (list image)))
             (should-not ended)
             (lispm-comfyui--on-message "execution_success" '((prompt_id . "p1")))
             (should (eq (plist-get ended :status) 'done))
@@ -367,6 +367,211 @@ Through the reroute and the bypassed node; the note does not run."
                                    (exception_message . "Out of memory\n")))
       (should (eq (plist-get run :status) 'failed))
       (should (equal (cdr (assoc "3" lispm-comfyui--errors)) "Out of memory")))))
+
+;;;; Dynamic prompts
+
+(ert-deftest lispm-comfyui-test-dynamic-prompt ()
+  "Choices are made as ComfyUI's frontend makes them, given the same draws.
+The texts wanted are what the frontend's processDynamicPrompt gave for
+the same draws."
+  (let ((draws '(0.7 0.1 0.9 0.4 0.55 0.05 0.95 0.3)))
+    (pcase-dolist (`(,text . ,wanted)
+                   '(("a {red|green|blue} apple" . "a blue apple")
+                     ("{x|{y|z}} and {p|q}" . "y and q")
+                     ("keep \\{braces\\} and \\| bars" . "keep {braces} and | bars")
+                     ("line // comment\nnext" . "line \nnext")
+                     ("/* block\ncomment */start {a|b}" . "start b")
+                     ("weights (red:1.2) \\(lit\\)" . "weights (red:1.2) \\(lit\\)")
+                     ("{|empty|} end" . " end")
+                     ("unclosed {a|b" . "unclosed b")
+                     ("nested {a{b|c}d|e}" . "nested e")
+                     ("{ {a|b} | {c|d} }" . " c ")))
+      (let ((k 0))
+        (cl-letf (((symbol-function 'random)
+                   (lambda (n) (prog1 (floor (* (nth (% k (length draws)) draws) n)) (cl-incf k)))))
+          (should (equal (lispm-comfyui-dynamic-prompt text) wanted)))))))
+
+(ert-deftest lispm-comfyui-test-dynamic-prompt-in-prompt ()
+  "A text of dynamic prompts is chosen in the prompt, and told back."
+  (let* ((types (lispm-comfyui-test--types))
+         (graph (lispm-comfyui-test--graph))
+         (resolved (make-hash-table)))
+    (lispm-comfyui-set-widget (lispm-comfyui-node graph 6) types "text" "a {cat|cat} on a mat")
+    (let ((prompt (lispm-comfyui-prompt graph types resolved)))
+      (should (equal (alist-get 'text (alist-get 'inputs (alist-get '\6 prompt))) "a cat on a mat"))
+      (should (equal (gethash 6 resolved) '(("text" . "a cat on a mat")))))))
+
+;;;; Widgets as the frontend makes them
+
+(ert-deftest lispm-comfyui-test-widget-type-and-seed ()
+  "An input of several types is the widget its widgetType names; an
+integer named seed has a control without its type saying so, one inside
+a dynamic combo not."
+  (let* ((types (lispm-comfyui-test--types))
+         (widgets (lispm-comfyui-widgets (gethash "MixedNode" types) '(97 25.0 5 "fixed"))))
+    (should (equal (mapcar (lambda (widget) (plist-get widget :name)) widgets)
+                   '("frames" "frame_rate" "seed")))
+    (should (eql (plist-get (nth 2 widgets) :control) 3))
+    (should (equal (lispm-comfyui-widget-control (nth 2 widgets) '(97 25.0 5 "fixed")) "fixed"))))
+
+(ert-deftest lispm-comfyui-test-stale-link ()
+  "Of two links into one input, the one the input names is kept."
+  (let* ((json (lispm-comfyui-test--json "workflow.json"))
+         (links (alist-get 'links json)))
+    (setf (alist-get 'links json) (vconcat links (vector [99 7 0 3 1 "CONDITIONING"])))
+    (let ((graph (lispm-comfyui-graph-from-json json)))
+      (should (equal (lispm-comfyui-link-from (lispm-comfyui-input-link graph (lispm-comfyui-node graph 3) 1))
+                     6)))))
+
+;;;; Subgraphs
+
+(defun lispm-comfyui-test--subgraphed ()
+  "The test workflow, its sampler and decoder made a subgraph: (GRAPH . NODE)."
+  (let* ((types (lispm-comfyui-test--types))
+         (graph (lispm-comfyui-test--graph))
+         (node (lispm-comfyui-graph-convert-to-subgraph
+                graph types (list (lispm-comfyui-node graph 3) (lispm-comfyui-node graph 8)) "Sample")))
+    (cons graph node)))
+
+(defun lispm-comfyui-test--renamed (prompt map)
+  "PROMPT, its numbers as MAP, an alist of strings, says, for comparing."
+  (lispm-comfyui-test--normal
+   (mapcar (lambda (entry)
+             (let ((rename (lambda (id) (or (cdr (assoc id map)) id))))
+               (cons (intern (funcall rename (symbol-name (car entry))))
+                     (list (cons 'inputs
+                                 (mapcar (lambda (input)
+                                           (let ((value (cdr input)))
+                                             (cons (car input)
+                                                   (if (and (vectorp value) (= (length value) 2) (stringp (aref value 0)))
+                                                       (vector (funcall rename (aref value 0)) (aref value 1))
+                                                     value))))
+                                         (alist-get 'inputs (cdr entry))))
+                           (assq 'class_type (cdr entry))))))
+           prompt)))
+
+(ert-deftest lispm-comfyui-test-subgraph-prompt ()
+  "A subgraph's nodes run as the nodes inside, numbered with its node's."
+  (let* ((types (lispm-comfyui-test--types))
+         (before (lispm-comfyui-prompt (lispm-comfyui-test--graph) types))
+         (made (lispm-comfyui-test--subgraphed))
+         (graph (car made))
+         (id (format "%s" (lispm-comfyui-node-id (cdr made))))
+         (after (lispm-comfyui-prompt graph types)))
+    (should (assq (intern (concat id ":3")) after))
+    (should (assq (intern (concat id ":8")) after))
+    (should-not (assq (intern id) after))
+    (should (equal (lispm-comfyui-test--renamed after `((,(concat id ":3") . "3") (,(concat id ":8") . "8")))
+                   (lispm-comfyui-test--renamed before nil)))
+    ;; Saved and read again, it runs the same.
+    (let ((again (lispm-comfyui-graph-from-string (lispm-comfyui-graph-string graph) types)))
+      (should (equal (lispm-comfyui-test--normal (lispm-comfyui-prompt again types))
+                     (lispm-comfyui-test--normal after))))))
+
+(ert-deftest lispm-comfyui-test-subgraph-unpack ()
+  "Unpacking a subgraph's node gives back the nodes, linked as before."
+  (let* ((types (lispm-comfyui-test--types))
+         (before (lispm-comfyui-prompt (lispm-comfyui-test--graph) types))
+         (made (lispm-comfyui-test--subgraphed))
+         (graph (car made))
+         (copies (lispm-comfyui-graph-unpack graph types (cdr made)))
+         (map (mapcar (lambda (copy)
+                        (cons (format "%s" (lispm-comfyui-node-id copy))
+                              (if (equal (lispm-comfyui-node-type copy) "KSampler") "3" "8")))
+                      copies)))
+    (should (= (length copies) 2))
+    (should (equal (lispm-comfyui-test--renamed (lispm-comfyui-prompt graph types) map)
+                   (lispm-comfyui-test--renamed before nil)))))
+
+(ert-deftest lispm-comfyui-test-subgraph-promoted ()
+  "An input of a subgraph linked to a widget inside is a widget of its
+nodes, each holding its own value, given to the widget inside."
+  (let* ((types (lispm-comfyui-test--types))
+         (made (lispm-comfyui-test--subgraphed))
+         (graph (car made))
+         (node (cdr made))
+         (subgraph (lispm-comfyui-node-subgraph graph node))
+         (inside (lispm-comfyui-subgraph-graph subgraph))
+         (index (lispm-comfyui-subgraph-add-slot graph subgraph 'input "steps" "INT")))
+    (lispm-comfyui-graph-connect inside types (lispm-comfyui-subgraph-io-node subgraph 'input) index
+                                 (lispm-comfyui-node inside 3) "steps")
+    (lispm-comfyui-align-instances graph types)
+    (let ((merged (lispm-comfyui-graph-types graph types)))
+      (should (equal (cdr (assoc "steps" (lispm-comfyui-node-widget-alist node merged))) 20))
+      (lispm-comfyui-set-widget node merged "steps" 33)
+      (let ((prompt (lispm-comfyui-prompt graph types)))
+        (should (equal (alist-get 'steps (alist-get 'inputs (alist-get (intern (format "%s:3" (lispm-comfyui-node-id node)))
+                                                                         prompt)))
+                       33)))
+      ;; Saved, its value is the subgraph node's.
+      (let* ((json (lispm-comfyui-graph-json graph))
+             (saved (seq-find (lambda (entry) (equal (alist-get 'id entry) (lispm-comfyui-node-id node)))
+                              (alist-get 'nodes json))))
+        (should (equal (alist-get 'widgets_values saved) [33]))))))
+
+(ert-deftest lispm-comfyui-test-subgraph-nested ()
+  "A subgraph inside another runs with the path of both nodes."
+  (let* ((types (lispm-comfyui-test--types))
+         (made (lispm-comfyui-test--subgraphed))
+         (graph (car made))
+         (outer (lispm-comfyui-graph-convert-to-subgraph
+                 graph types (list (cdr made) (lispm-comfyui-node graph 9)) "Outer"))
+         (prompt (lispm-comfyui-prompt graph types)))
+    (should (seq-find (lambda (entry) (string-match-p (format "\\`%s:[0-9]+:3\\'" (lispm-comfyui-node-id outer))
+                                                      (symbol-name (car entry))))
+                      prompt))
+    (should (= (length prompt) 8))))
+
+(ert-deftest lispm-comfyui-test-subgraph-legacy-and-renumber ()
+  "A workflow saved by an older frontend reads as the frontend reads it:
+inner nodes numbered as outer ones renumbered, proxyWidgets made inputs."
+  (let* ((types (lispm-comfyui-test--types))
+         (made (lispm-comfyui-test--subgraphed))
+         (json (lispm-comfyui-graph-json (car made)))
+         (id (lispm-comfyui-node-id (cdr made)))
+         (definition (aref (alist-get 'subgraphs (alist-get 'definitions json)) 0))
+         (instance (seq-find (lambda (entry) (equal (alist-get 'id entry) id)) (alist-get 'nodes json))))
+    ;; The sampler inside numbered as the checkpoint loader outside.
+    (dolist (node (append (alist-get 'nodes definition) nil))
+      (when (equal (alist-get 'id node) 3) (setf (alist-get 'id node) 4)))
+    (dolist (link (append (alist-get 'links definition) nil))
+      (when (equal (alist-get 'origin_id link) 3) (setf (alist-get 'origin_id link) 4))
+      (when (equal (alist-get 'target_id link) 3) (setf (alist-get 'target_id link) 4)))
+    (setf (alist-get 'properties instance) '((proxyWidgets . [["4" "steps"]]))
+          (alist-get 'widgets_values instance) [42])
+    (let* ((graph (lispm-comfyui-graph-from-json json types))
+           (prompt (lispm-comfyui-prompt graph types))
+           (sampler (seq-find (lambda (entry) (equal (alist-get 'class_type (cdr entry)) "KSampler")) prompt)))
+      (should-not (equal (car sampler) (intern (format "%s:4" id))))
+      (should (equal (alist-get 'steps (alist-get 'inputs (cdr sampler))) 42))
+      (should (equal (alist-get 'model (alist-get 'inputs (cdr sampler))) ["4" 0]))
+      (should-not (alist-get 'proxyWidgets (alist-get 'properties (lispm-comfyui-node-extra
+                                                                   (lispm-comfyui-node graph id))))))))
+
+(ert-deftest lispm-comfyui-test-subgraph-window ()
+  "The window enters a subgraph, shows its inputs and outputs, and leaves."
+  (lispm-comfyui-test--with-canvas
+    (lispm-comfyui--select 3)
+    (setq lispm-comfyui--marked (list 3 8))
+    (lispm-comfyui-make-subgraph "Sample")
+    (let ((id lispm-comfyui--selected))
+      (should (lispm-comfyui-node-subgraph lispm-comfyui--root (lispm-comfyui-node lispm-comfyui--graph id)))
+      (lispm-comfyui-enter-subgraph)
+      (should (equal lispm-comfyui--path (list id)))
+      (should (lispm-comfyui-node lispm-comfyui--graph 3))
+      (should (lispm-comfyui-canvas-place lispm-comfyui--layout lispm-comfyui-input-node))
+      (should (string-search "› Sample" (lispm-comfyui--header)))
+      ;; A change inside is one step to undo, with the workflow.
+      (lispm-comfyui--set (lispm-comfyui-node lispm-comfyui--graph 3) "steps" 9)
+      (lispm-comfyui-undo)
+      (should (equal (cdr (assoc "steps" (lispm-comfyui-node-widget-alist
+                                          (lispm-comfyui-node lispm-comfyui--graph 3) (lispm-comfyui--types))))
+                     20))
+      (lispm-comfyui-leave-subgraph)
+      (should-not lispm-comfyui--path)
+      (should (equal lispm-comfyui--selected id))
+      (lispm-comfyui-unpack-subgraph)
+      (should (= (length (lispm-comfyui-graph-nodes lispm-comfyui--root)) 11)))))
 
 ;;;; The client
 

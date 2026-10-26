@@ -1358,5 +1358,57 @@
   "description": "",
   "category": "test",
   "output_node": true
+ },
+ "MixedNode": {
+  "input": {
+   "required": {
+    "frames": [
+     "INT",
+     {
+      "default": 97,
+      "min": 1
+     }
+    ],
+    "frame_rate": [
+     "FLOAT,INT",
+     {
+      "default": 25.0,
+      "widgetType": "FLOAT"
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0
+     }
+    ],
+    "latent": [
+     "LATENT"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "frames",
+    "frame_rate",
+    "seed",
+    "latent"
+   ]
+  },
+  "output": [
+   "LATENT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "LATENT"
+  ],
+  "name": "MixedNode",
+  "display_name": "Mixed Node",
+  "description": "",
+  "category": "test",
+  "output_node": false
  }
 }

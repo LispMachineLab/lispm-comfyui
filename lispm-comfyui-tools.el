@@ -56,78 +56,130 @@
         ((stringp value) (json-serialize value))
         (t (format "%s" value))))
 
+(defun lispm-comfyui-tools--source-text (graph link prefix subgraph)
+  "Where LINK, into a node of GRAPH, numbered after PREFIX, comes from.
+SUBGRAPH is the definition GRAPH is the inside of, if any."
+  (let ((from (lispm-comfyui-link-from link))
+        (slot (lispm-comfyui-link-from-slot link)))
+    (if (and subgraph (eql from lispm-comfyui-input-node))
+        (format "%sin.%s" prefix
+                (lispm-comfyui-slot-name (nth slot (lispm-comfyui-subgraph-inputs subgraph))))
+      (let ((node (lispm-comfyui-node graph from)))
+        (format "#%s%s.%s" prefix from
+                (if node (lispm-comfyui-slot-name (nth slot (lispm-comfyui-node-outputs node))) slot))))))
+
+(defun lispm-comfyui-tools--target-text (graph link prefix subgraph)
+  "Where LINK, out of a node of GRAPH, numbered after PREFIX, goes.
+SUBGRAPH is the definition GRAPH is the inside of, if any."
+  (let ((to (lispm-comfyui-link-to link))
+        (slot (lispm-comfyui-link-to-slot link)))
+    (if (and subgraph (eql to lispm-comfyui-output-node))
+        (format "%sout.%s" prefix
+                (lispm-comfyui-slot-name (nth slot (lispm-comfyui-subgraph-outputs subgraph))))
+      (let ((node (lispm-comfyui-node graph to)))
+        (format "#%s%s.%s" prefix to
+                (if node (lispm-comfyui-slot-name (nth slot (lispm-comfyui-node-inputs node))) "?"))))))
+
+(defun lispm-comfyui-tools--node-text (graph node types prefix subgraph errors)
+  "Lines telling of NODE of GRAPH, of TYPES, numbered after PREFIX.
+SUBGRAPH is the definition GRAPH is the inside of, if any; ERRORS what
+went wrong at nodes, by their numbers in the prompt."
+  (with-temp-buffer
+    (let* ((name (lispm-comfyui-node-name node types))
+           (definition (gethash (lispm-comfyui-node-type node) types))
+           (inner (alist-get 'lispm-subgraph definition))
+           (type (if inner "subgraph" (lispm-comfyui-node-type node))))
+      (insert (format "\n#%s%s %s%s%s\n" prefix (lispm-comfyui-node-id node) type
+                      (if (equal name type) "" (format " \"%s\"" name))
+                      (pcase (lispm-comfyui-node-mode node) (4 " [bypassed]") (2 " [muted]") (_ ""))))
+      (cl-loop for slot in (lispm-comfyui-node-inputs node)
+               for index from 0
+               for link = (lispm-comfyui-input-link graph node index)
+               when link
+               do (insert (format "  %s <- %s\n" (lispm-comfyui-slot-name slot)
+                                  (lispm-comfyui-tools--source-text graph link prefix subgraph)))
+               unless (or link (lispm-comfyui-slot-widget slot))
+               do (insert (format "  %s: %s, not linked\n" (lispm-comfyui-slot-name slot)
+                                  (lispm-comfyui-slot-type slot))))
+      (when (and (null definition) (consp (lispm-comfyui-node-values node))
+                 (not (keywordp (car (lispm-comfyui-node-values node)))))
+        ;; A note, or a node of a type the server has not.
+        (insert (format "  values = %s\n" (mapconcat #'lispm-comfyui-tools--value
+                                                     (lispm-comfyui-node-values node) ", "))))
+      (let ((linked (cl-loop for slot in (lispm-comfyui-node-inputs node)
+                             for index from 0
+                             when (lispm-comfyui-input-link graph node index)
+                             collect (lispm-comfyui-slot-name slot)))
+            (alist (lispm-comfyui-node-widget-alist node types)))
+        (pcase-dolist (`(,name . ,value) alist)
+          (unless (or (member name linked) (string-suffix-p "/control" name)
+                      (and (consp value) (consp (car value))))
+            (let ((control (cdr (assoc (concat name "/control") alist))))
+              (insert (format "  %s = %s%s\n" name (lispm-comfyui-tools--value value)
+                              (if (and control (not (equal control "fixed")))
+                                  (format " (%s after each run)" control) "")))))))
+      (cl-loop for slot in (lispm-comfyui-node-outputs node)
+               for index from 0
+               for links = (lispm-comfyui-output-links graph node index)
+               do (insert (format "  -> %s: %s%s\n" (lispm-comfyui-slot-name slot)
+                                  (lispm-comfyui-slot-type slot)
+                                  (if links
+                                      (concat " to " (mapconcat (lambda (link)
+                                                                  (lispm-comfyui-tools--target-text
+                                                                   graph link prefix subgraph))
+                                                                links ", "))
+                                    ""))))
+      (when-let* ((failure (cdr (assoc (format "%s%s" prefix (lispm-comfyui-node-id node)) errors))))
+        (insert (format "  ERROR: %s\n" failure))))
+    (buffer-string)))
+
 (defun lispm-comfyui-tools-describe (buffer)
-  "The workflow of BUFFER, as text for a model."
+  "The workflow of BUFFER, as text for a model.
+Nodes inside subgraphs are numbered with the path to them, as #12:5,
+the inside of each subgraph told once."
   (with-current-buffer buffer
-    (let* ((types (lispm-comfyui--types))
-           (graph lispm-comfyui--graph)
-           (nodes (lispm-comfyui-graph-nodes graph)))
+    (let ((types (lispm-comfyui--types))
+          (root lispm-comfyui--root)
+          (errors lispm-comfyui--errors)
+          (name lispm-comfyui--name)
+          (modified lispm-comfyui--modified)
+          (path (mapconcat (lambda (id) (format "%s:" id)) lispm-comfyui--path ""))
+          (selected lispm-comfyui--selected)
+          (run (car lispm-comfyui--runs))
+          (told nil))
       (with-temp-buffer
         (insert (format "Workflow %s%s, %d nodes, on the ComfyUI server at %s.\n"
-                        (or lispm-comfyui--name "Untitled (not saved)")
-                        (if lispm-comfyui--modified " (changed since saved)" "")
-                        (length nodes) lispm-comfyui-url))
-        (when-let* ((run (car lispm-comfyui--runs)))
+                        (or name "Untitled (not saved)") (if modified " (changed since saved)" "")
+                        (length (lispm-comfyui-graph-nodes root)) lispm-comfyui-url))
+        (when run
           (insert (format "Last run: %s%s.\n" (plist-get run :status)
                           (if (plist-get run :message) (concat ", " (plist-get run :message)) ""))))
-        (when lispm-comfyui--selected
-          (insert (format "The user has node #%s chosen.\n" lispm-comfyui--selected)))
-        (dolist (node nodes)
-          (let ((name (lispm-comfyui-node-name node types)))
-            (insert (format "\n#%s %s%s%s\n" (lispm-comfyui-node-id node) (lispm-comfyui-node-type node)
-                            (if (equal name (lispm-comfyui-node-type node)) "" (format " \"%s\"" name))
-                            (pcase (lispm-comfyui-node-mode node) (4 " [bypassed]") (2 " [muted]") (_ ""))))
-            (cl-loop for slot in (lispm-comfyui-node-inputs node)
-                     for index from 0
-                     for link = (lispm-comfyui-input-link graph node index)
-                     when link
-                     do (let ((from (lispm-comfyui-node graph (lispm-comfyui-link-from link))))
-                          (insert (format "  %s <- #%s.%s\n" (lispm-comfyui-slot-name slot)
-                                          (lispm-comfyui-link-from link)
-                                          (if from (lispm-comfyui-slot-name
-                                                    (nth (lispm-comfyui-link-from-slot link)
-                                                         (lispm-comfyui-node-outputs from)))
-                                            (lispm-comfyui-link-from-slot link)))))
-                     unless (or link (lispm-comfyui-slot-widget slot))
-                     do (insert (format "  %s: %s, not linked\n" (lispm-comfyui-slot-name slot)
-                                        (lispm-comfyui-slot-type slot))))
-            (when (and (null (gethash (lispm-comfyui-node-type node) types))
-                       (lispm-comfyui-node-values node)
-                       (not (lispm-comfyui-values-by-name-p (lispm-comfyui-node-values node))))
-              ;; A note, or a node of a type the server has not.
-              (insert (format "  values = %s\n" (mapconcat #'lispm-comfyui-tools--value
-                                                           (lispm-comfyui-node-values node) ", "))))
-            (let ((linked (cl-loop for slot in (lispm-comfyui-node-inputs node)
-                                   for index from 0
-                                   when (lispm-comfyui-input-link graph node index)
-                                   collect (lispm-comfyui-slot-name slot))))
-              (pcase-dolist (`(,name . ,value) (lispm-comfyui-node-widget-alist node types))
-                (unless (or (member name linked) (string-suffix-p "/control" name)
-                            (and (consp value) (consp (car value))))
-                  (let ((control (cdr (assoc (concat name "/control")
-                                             (lispm-comfyui-node-widget-alist node types)))))
-                    (insert (format "  %s = %s%s\n" name (lispm-comfyui-tools--value value)
-                                    (if (and control (not (equal control "fixed")))
-                                        (format " (%s after each run)" control) "")))))))
-            (cl-loop for slot in (lispm-comfyui-node-outputs node)
-                     for index from 0
-                     for links = (lispm-comfyui-output-links graph node index)
-                     do (insert (format "  -> %s: %s%s\n" (lispm-comfyui-slot-name slot)
-                                        (lispm-comfyui-slot-type slot)
-                                        (if links
-                                            (concat " to "
-                                                    (mapconcat (lambda (link)
-                                                                 (let ((to (lispm-comfyui-node graph (lispm-comfyui-link-to link))))
-                                                                   (format "#%s.%s" (lispm-comfyui-link-to link)
-                                                                           (if to (lispm-comfyui-slot-name
-                                                                                   (nth (lispm-comfyui-link-to-slot link)
-                                                                                        (lispm-comfyui-node-inputs to)))
-                                                                             "?"))))
-                                                               links ", "))
-                                          ""))))
-            (when-let* ((failure (cdr (assoc (format "%s" (lispm-comfyui-node-id node))
-                                             lispm-comfyui--errors))))
-              (insert (format "  ERROR: %s\n" failure)))))
+        (unless (string-empty-p path)
+          (insert (format "The user is looking inside the subgraph of #%s.\n" (string-remove-suffix ":" path))))
+        (when selected
+          (insert (format "The user has node #%s%s chosen.\n" path selected)))
+        (cl-labels
+            ((describe (graph prefix subgraph)
+               (dolist (node (lispm-comfyui-graph-nodes graph))
+                 (insert (lispm-comfyui-tools--node-text graph node types prefix subgraph errors))
+                 (when-let* ((inner (lispm-comfyui-node-subgraph root node)))
+                   (let ((here (format "%s%s:" prefix (lispm-comfyui-node-id node))))
+                     (if (assq inner told)
+                         (insert (format "  inside: the subgraph \"%s\", told inside #%s\n"
+                                         (lispm-comfyui-subgraph-name inner)
+                                         (string-remove-suffix ":" (cdr (assq inner told)))))
+                       (push (cons inner here) told)
+                       (insert (format "\nInside #%s, the subgraph \"%s\", the same in all its nodes: inputs %s; outputs %s.\n"
+                                       (string-remove-suffix ":" here) (lispm-comfyui-subgraph-name inner)
+                                       (mapconcat (lambda (slot) (format "%sin.%s: %s" here (lispm-comfyui-slot-name slot)
+                                                                         (lispm-comfyui-slot-type slot)))
+                                                  (lispm-comfyui-subgraph-inputs inner) ", ")
+                                       (mapconcat (lambda (slot) (format "%sout.%s: %s" here (lispm-comfyui-slot-name slot)
+                                                                         (lispm-comfyui-slot-type slot)))
+                                                  (lispm-comfyui-subgraph-outputs inner) ", ")))
+                       (describe (lispm-comfyui-subgraph-graph inner) here inner)
+                       (insert (format "End of the inside of #%s.\n" (string-remove-suffix ":" here)))))))))
+          (describe root "" nil))
         (buffer-string)))))
 
 (defun lispm-comfyui-tools--spec-text (name spec)
@@ -222,122 +274,216 @@ has them all."
                                                 (car (split-string description "\n")) 120 nil nil "…")))))
                       (seq-take found (or limit 25)) "")))))))
 
-(defun lispm-comfyui-tools--node-ref (references value)
-  "The node number VALUE names: a number, or a name an earlier add gave.
-REFERENCES maps those names to numbers."
-  (cond ((numberp value) value)
-        ((and (stringp value) (gethash value references)))
-        ((and (stringp value) (string-match "\\`#?\\([0-9]+\\)\\'" value))
-         (string-to-number (match-string 1 value)))
-        (t (signal 'lispm-comfyui-error (list (format "No node %S" value))))))
+(defun lispm-comfyui-tools--resolve (root references value)
+  "The node VALUE names in ROOT's workflow, (GRAPH . NODE).
+VALUE is a number; a name an earlier add gave, in REFERENCES; or a
+path, \"12:5\", node 5 inside the subgraph of node 12, with \"12:in\" and
+\"12:out\" the nodes of that subgraph's inputs and outputs."
+  (let ((fail (lambda () (signal 'lispm-comfyui-error (list (format "No node %s" value))))))
+    (cond
+     ((numberp value) (cons root (or (lispm-comfyui-node root value) (funcall fail))))
+     ((and (stringp value) (gethash value references)))
+     ((stringp value)
+      (let ((graph root) (subgraph nil) (node nil)
+            (parts (split-string (string-remove-prefix "#" (string-trim value)) ":")))
+        (while parts
+          (let ((part (pop parts)))
+            (cond
+             ((and (null parts) subgraph (member part '("in" "out")))
+              (setq node (lispm-comfyui-subgraph-io-node subgraph (if (equal part "in") 'input 'output))))
+             ((string-match-p "\\`[0-9]+\\'" part)
+              (setq node (or (lispm-comfyui-node graph (string-to-number part)) (funcall fail)))
+              (when parts
+                (setq subgraph (or (lispm-comfyui-node-subgraph root node) (funcall fail))
+                      graph (lispm-comfyui-subgraph-graph subgraph))))
+             (t (funcall fail)))))
+        (cons graph node)))
+     (t (funcall fail)))))
+
+(defun lispm-comfyui-tools--io-slot (root graph node name type which)
+  "The index of the slot NAME of NODE, a subgraph's WHICH, made if new.
+NODE stands for the inputs or the outputs of the subgraph GRAPH is the
+inside of, in ROOT; a new slot is of TYPE.  Returns (NODE . INDEX),
+NODE made anew if a slot was."
+  (let* ((slots (if (eq which 'input) (lispm-comfyui-node-outputs node) (lispm-comfyui-node-inputs node)))
+         (index (seq-position slots name (lambda (slot name) (equal (lispm-comfyui-slot-name slot) name)))))
+    (if index
+        (cons node index)
+      (let* ((subgraph (seq-find (lambda (subgraph) (eq (lispm-comfyui-subgraph-graph subgraph) graph))
+                                 (lispm-comfyui-graph-subgraphs root)))
+             (index (lispm-comfyui-subgraph-add-slot root subgraph which name type)))
+        (cons (lispm-comfyui-subgraph-io-node subgraph which) index)))))
 
 (defun lispm-comfyui-tools-apply (buffer operations)
-  "Apply OPERATIONS, a list of alists as the model sends them, to BUFFER's graph.
-All or none: one failing leaves the graph as it was.  Returns what was
-done, a string."
+  "Apply OPERATIONS, alists as the model sends them, to BUFFER's workflow.
+All or none: one failing leaves the workflow as it was.  Returns what
+was done, a string."
   (with-current-buffer buffer
     (let* ((types (lispm-comfyui--need-types))
+           (server (lispm-comfyui-cached-types))
+           (root lispm-comfyui--root)
            (references (make-hash-table :test #'equal))
-           (graph lispm-comfyui--graph)
            (added nil)
            (done nil)
-           (node-of (lambda (operation key)
-                      (or (lispm-comfyui-node graph (lispm-comfyui-tools--node-ref
-                                                     references (alist-get key operation)))
-                          (signal 'lispm-comfyui-error
-                                  (list (format "No node %s" (alist-get key operation))))))))
+           (resolve (lambda (operation key)
+                      (lispm-comfyui-tools--resolve root references (alist-get key operation))))
+           (subgraph-type (lambda (name)
+                            (or (and (gethash name types) name)
+                                (when-let* ((subgraph (seq-find (lambda (subgraph)
+                                                                  (equal (lispm-comfyui-subgraph-name subgraph) name))
+                                                                (lispm-comfyui-graph-subgraphs root))))
+                                  (lispm-comfyui-subgraph-id subgraph))
+                                name))))
       (lispm-comfyui--change
         (seq-doseq (operation operations)
+          (setq types (lispm-comfyui-graph-types root server))
           (let ((op (alist-get 'op operation)))
             (pcase op
               ("add"
-               (let ((node (lispm-comfyui-graph-add-node graph types (alist-get 'type operation))))
+               (let* ((graph (if (alist-get 'in operation)
+                                 (let ((place (lispm-comfyui-tools--resolve
+                                               root references (format "%s:in" (alist-get 'in operation)))))
+                                   (car place))
+                               root))
+                      (node (lispm-comfyui-graph-add-node graph types
+                                                          (funcall subgraph-type (alist-get 'type operation)))))
                  (when-let* ((title (alist-get 'title operation)))
                    (setf (lispm-comfyui-node-title node) title))
                  (when-let* ((ref (alist-get 'ref operation)))
-                   (puthash ref (lispm-comfyui-node-id node) references))
+                   (puthash ref (cons graph node) references))
                  (pcase-dolist (`(,name . ,value) (alist-get 'values operation))
                    (lispm-comfyui-set-widget node types (symbol-name name) value))
-                 (push node added)
-                 (push (format "added #%s %s%s" (lispm-comfyui-node-id node) (lispm-comfyui-node-type node)
+                 (push (cons graph node) added)
+                 (push (format "added #%s%s %s%s"
+                               (if (alist-get 'in operation) (format "%s:" (alist-get 'in operation)) "")
+                               (lispm-comfyui-node-id node) (alist-get 'type operation)
                                (if (alist-get 'ref operation) (format " as %s" (alist-get 'ref operation)) ""))
                        done)))
               ("set"
-               (let ((node (funcall node-of operation 'node)))
+               (let ((node (cdr (funcall resolve operation 'node))))
                  (lispm-comfyui-set-widget node types (alist-get 'name operation) (alist-get 'value operation))
-                 (push (format "set #%s %s" (lispm-comfyui-node-id node) (alist-get 'name operation)) done)))
+                 (push (format "set %s %s" (alist-get 'node operation) (alist-get 'name operation)) done)))
               ("connect"
-               (let* ((from (funcall node-of operation 'from_node))
-                      (to (funcall node-of operation 'to_node))
-                      (output (alist-get 'from_output operation)))
+               (pcase-let* ((`(,graph . ,from) (funcall resolve operation 'from_node))
+                            (`(,to-graph . ,to) (funcall resolve operation 'to_node))
+                            (output (alist-get 'from_output operation))
+                            (input (alist-get 'to_input operation)))
+                 (unless (eq graph to-graph)
+                   (signal 'lispm-comfyui-error
+                           (list "Linked nodes must be in the same graph: link through a subgraph's in or out")))
+                 ;; A subgraph's input or output named anew is made.
+                 (when (eql (lispm-comfyui-node-id from) lispm-comfyui-input-node)
+                   (let ((made (lispm-comfyui-tools--io-slot
+                                root graph from (format "%s" (or output input)) 
+                                (lispm-comfyui-input-type to types (lispm-comfyui-ensure-input to types input))
+                                'input)))
+                     (setq from (car made) output (cdr made))))
+                 (when (eql (lispm-comfyui-node-id to) lispm-comfyui-output-node)
+                   (let* ((index (if (integerp output) output (lispm-comfyui-output-index from output)))
+                          (made (lispm-comfyui-tools--io-slot
+                                 root graph to (format "%s" input)
+                                 (lispm-comfyui-slot-type (nth (or index 0) (lispm-comfyui-node-outputs from)))
+                                 'output)))
+                     (setq to (car made))))
                  (lispm-comfyui-graph-connect graph types from (if (stringp output) output (or output 0))
-                                        to (alist-get 'to_input operation))
-                 (push (format "linked #%s.%s to #%s.%s" (lispm-comfyui-node-id from) (or output 0)
-                               (lispm-comfyui-node-id to) (alist-get 'to_input operation))
+                                              to input)
+                 (push (format "linked %s.%s to %s.%s" (alist-get 'from_node operation) (or output 0)
+                               (alist-get 'to_node operation) input)
                        done)))
               ("disconnect"
-               (let* ((node (funcall node-of operation 'node))
-                      (index (or (lispm-comfyui-input-index node (alist-get 'input operation))
-                                 (signal 'lispm-comfyui-error
-                                         (list (format "Node #%s has no input %s" (lispm-comfyui-node-id node)
-                                                       (alist-get 'input operation)))))))
+               (pcase-let* ((`(,graph . ,node) (funcall resolve operation 'node))
+                            (index (or (lispm-comfyui-input-index node (alist-get 'input operation))
+                                       (signal 'lispm-comfyui-error
+                                               (list (format "Node %s has no input %s" (alist-get 'node operation)
+                                                             (alist-get 'input operation)))))))
                  (lispm-comfyui-graph-disconnect graph node index)
-                 (push (format "unlinked #%s.%s" (lispm-comfyui-node-id node) (alist-get 'input operation)) done)))
+                 (push (format "unlinked %s.%s" (alist-get 'node operation) (alist-get 'input operation)) done)))
               ("remove"
-               (let ((node (funcall node-of operation 'node)))
+               (pcase-let ((`(,graph . ,node) (funcall resolve operation 'node)))
                  (lispm-comfyui-remove-node graph node)
-                 (setq added (delq node added))
-                 (push (format "removed #%s" (lispm-comfyui-node-id node)) done)))
+                 (setq added (seq-remove (lambda (entry) (eq (cdr entry) node)) added))
+                 (push (format "removed %s" (alist-get 'node operation)) done)))
               ("mode"
-               (let ((node (funcall node-of operation 'node))
+               (let ((node (cdr (funcall resolve operation 'node)))
                      (mode (alist-get 'mode operation)))
                  (setf (lispm-comfyui-node-mode node)
                        (pcase mode ("bypass" 4) ("mute" 2) ("normal" 0)
                               (_ (signal 'lispm-comfyui-error
                                          (list (format "A mode is normal, bypass or mute, not %s" mode))))))
-                 (push (format "made #%s %s" (lispm-comfyui-node-id node) mode) done)))
+                 (push (format "made %s %s" (alist-get 'node operation) mode) done)))
               ("title"
-               (let ((node (funcall node-of operation 'node)))
+               (let ((node (cdr (funcall resolve operation 'node))))
                  (setf (lispm-comfyui-node-title node) (alist-get 'title operation))
-                 (push (format "titled #%s" (lispm-comfyui-node-id node)) done)))
+                 (push (format "titled %s" (alist-get 'node operation)) done)))
               ("move"
-               (let ((node (funcall node-of operation 'node)))
+               (let ((node (cdr (funcall resolve operation 'node))))
                  (setf (lispm-comfyui-node-x node) (alist-get 'x operation)
                        (lispm-comfyui-node-y node) (alist-get 'y operation))
-                 (push (format "moved #%s" (lispm-comfyui-node-id node)) done)))
+                 (push (format "moved %s" (alist-get 'node operation)) done)))
+              ("subgraph"
+               (let* ((places (mapcar (lambda (value) (lispm-comfyui-tools--resolve root references value))
+                                      (alist-get 'nodes operation)))
+                      (graph (car (car places))))
+                 (unless (and places (seq-every-p (lambda (place) (eq (car place) graph)) places))
+                   (signal 'lispm-comfyui-error (list "A subgraph is made of nodes of one graph")))
+                 (let ((node (lispm-comfyui-graph-convert-to-subgraph
+                              graph server (mapcar #'cdr places) (alist-get 'name operation))))
+                   (when-let* ((ref (alist-get 'ref operation)))
+                     (puthash ref (cons graph node) references))
+                   (push (format "made the subgraph node #%s" (lispm-comfyui-node-id node)) done))))
+              ("unpack"
+               (pcase-let ((`(,graph . ,node) (funcall resolve operation 'node)))
+                 (let ((nodes (lispm-comfyui-graph-unpack graph server node)))
+                   (push (format "unpacked %s into %s" (alist-get 'node operation)
+                                 (mapconcat (lambda (node) (format "#%s" (lispm-comfyui-node-id node))) nodes ", "))
+                         done))))
               (_ (signal 'lispm-comfyui-error (list (format "No operation %S" op)))))))
         ;; New nodes go where their links lead, those placed by a
         ;; move staying where they were put.
-        (dolist (node (reverse added))
+        (pcase-dolist (`(,graph . ,node) (reverse added))
           (unless (seq-find (lambda (operation)
                               (and (equal (alist-get 'op operation) "move")
-                                   (equal (ignore-errors (lispm-comfyui-tools--node-ref
-                                                          references (alist-get 'node operation)))
-                                          (lispm-comfyui-node-id node))))
+                                   (eq (cdr (ignore-errors (lispm-comfyui-tools--resolve
+                                                            root references (alist-get 'node operation))))
+                                       node)))
                             operations)
-            (lispm-comfyui-place graph node (lispm-comfyui--node))
-            (lispm-comfyui--clear-place node)))
-        (when added (setq lispm-comfyui--selected (lispm-comfyui-node-id (car added))
-                          lispm-comfyui--focus 0)))
+            (lispm-comfyui-place graph node (and (eq graph lispm-comfyui--graph) (lispm-comfyui--node)))
+            (when (eq graph lispm-comfyui--graph)
+              (lispm-comfyui--clear-place node))))
+        (when-let* ((shown (seq-find (lambda (entry) (eq (car entry) lispm-comfyui--graph)) added)))
+          (setq lispm-comfyui--selected (lispm-comfyui-node-id (cdr shown))
+                lispm-comfyui--focus 0)))
       (when added (lispm-comfyui--fit) (lispm-comfyui--draw))
-      (let ((missing (lispm-comfyui-tools--missing graph types)))
+      (let ((missing (lispm-comfyui-tools--missing root (lispm-comfyui--types))))
         (concat (string-join (nreverse done) "; ") "."
                 (if missing (concat "\nStill missing: " (string-join missing "; ") ".") ""))))))
 
-(defun lispm-comfyui-tools--missing (graph types)
-  "The required inputs of GRAPH's nodes, of TYPES, nothing feeds."
-  (cl-loop for node in (lispm-comfyui-graph-nodes graph)
-           for definition = (gethash (lispm-comfyui-node-type node) types)
-           when (and definition (eql (lispm-comfyui-node-mode node) 0))
-           append (cl-loop for (name spec section) in (lispm-comfyui-type-inputs definition)
-                           for index = (lispm-comfyui-input-index node name)
-                           when (and (eq section 'required) (null (lispm-comfyui-widget-kind spec))
-                                     (not (and index (lispm-comfyui-input-link graph node index))))
-                           collect (format "#%s.%s (%s)" (lispm-comfyui-node-id node) name
-                                           (lispm-comfyui-socket-type spec)))))
+(defun lispm-comfyui-tools--missing (root types)
+  "The required inputs of the nodes of ROOT's workflow, of TYPES, nothing feeds.
+Those of nodes inside subgraphs numbered by their paths."
+  (let ((told nil) (missing nil))
+    (cl-labels
+        ((walk (graph prefix)
+           (dolist (node (lispm-comfyui-graph-nodes graph))
+             (let ((definition (gethash (lispm-comfyui-node-type node) types)))
+               (when (and definition (eql (lispm-comfyui-node-mode node) 0))
+                 (cl-loop for (name spec section) in (lispm-comfyui-type-inputs definition)
+                          for index = (lispm-comfyui-input-index node name)
+                          when (and (eq section 'required) (null (lispm-comfyui-widget-kind spec))
+                                    (not (and index (lispm-comfyui-input-link graph node index))))
+                          do (push (format "#%s%s.%s (%s)" prefix (lispm-comfyui-node-id node) name
+                                           (lispm-comfyui-socket-type spec))
+                                   missing))
+                 (when-let* ((inner (alist-get 'lispm-subgraph definition))
+                             ((not (memq inner told))))
+                   (push inner told)
+                   (walk (lispm-comfyui-subgraph-graph inner)
+                         (format "%s%s:" prefix (lispm-comfyui-node-id node)))))))))
+      (walk root ""))
+    (nreverse missing)))
 
 (lispm-deftool comfyui_workflow ()
-  "Read the ComfyUI workflow open in LispM, the one the user sees: its nodes, each `#ID TYPE \"TITLE\"`, the inputs linked into each (`name <- #ID.output`), its widgets' values (`name = value`), its outputs and where they go, and errors of the last run.  Opens a new, empty workflow if none is open."
+  "Read the ComfyUI workflow open in LispM, the one the user sees: its nodes, each `#ID TYPE \"TITLE\"`, the inputs linked into each (`name <- #ID.output`), its widgets' values (`name = value`), its outputs and where they go, and errors of the last run.  The inside of each subgraph is told once, its nodes numbered with the path to them, as #12:5 inside the subgraph of node 12, its inputs and outputs as 12:in.NAME and 12:out.NAME.  Opens a new, empty workflow if none is open."
   :deferred t
   (let ((buffer (lispm-comfyui-tools--buffer t)))
     (with-current-buffer buffer (lispm-comfyui--need-types))
@@ -351,7 +497,7 @@ done, a string."
     (with-current-buffer buffer
       (lispm-comfyui-tools-find-types (lispm-comfyui--need-types) query limit))))
 
-(lispm-deftool comfyui_edit ((operations array "The changes, in order, each an object with `op`: {op: \"add\", type, ref?, title?, values?: {widget: value}} adds a node, which later operations name by its ref; {op: \"set\", node, name, value} sets a widget (name \"seed/control\" sets how a seed changes after each run: fixed, increment, decrement or randomize); {op: \"connect\", from_node, from_output (name or index), to_node, to_input} links an output to an input, or to a widget, which it then feeds; {op: \"disconnect\", node, input}; {op: \"remove\", node}; {op: \"mode\", node, mode: normal|bypass|mute}; {op: \"title\", node, title}; {op: \"move\", node, x, y}.  A node is its number or an add's ref."
+(lispm-deftool comfyui_edit ((operations array "The changes, in order, each an object with `op`: {op: \"add\", type, in?, ref?, title?, values?: {widget: value}} adds a node, inside the subgraph of node `in` if given (a path), of a node type or of a subgraph by its name, which later operations name by its ref; {op: \"set\", node, name, value} sets a widget (name \"seed/control\" sets how a seed changes after each run: fixed, increment, decrement or randomize); {op: \"connect\", from_node, from_output (name or index), to_node, to_input} links an output to an input, or to a widget, which it then feeds; from \"12:in\" or to \"12:out\", a subgraph's input or output, made if the name is new; {op: \"disconnect\", node, input}; {op: \"remove\", node}; {op: \"mode\", node, mode: normal|bypass|mute}; {op: \"title\", node, title}; {op: \"move\", node, x, y}; {op: \"subgraph\", nodes, name, ref?} makes a subgraph of nodes of one graph, a node of it in their place; {op: \"unpack\", node} puts the nodes inside a subgraph's node in its place.  A node is its number, a path into subgraphs as \"12:5\", or an add's ref."
                                          :items ((type . "object"))))
   "Change the ComfyUI workflow open in LispM, as the user sees it change: all the operations, or none if one fails, as one step the user can undo.  New nodes are placed beside those they are linked to.  Says what was done and which required inputs are still not linked."
   :permission write

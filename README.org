@@ -48,6 +48,11 @@ library.  A node is chosen, and one of its items: its title, an input, an output
 | =s= =S=                           | save the workflow in the server's library, under another name |
 | =o= =O= =N=                       | open a workflow of the library, of a file, a new one          |
 | =g=                               | read the server's node types again                             |
+| =C-M-d= =>=, =C-M-u= =<=          | enter the subgraph of the node chosen, leave it                |
+| =m= =M-m=                         | mark the node chosen, or no longer; mark none                  |
+| =G=                               | make a subgraph of the nodes marked, or of the node chosen     |
+| =X=                               | put the nodes inside the subgraph's node chosen in its place   |
+| =C-u t=                           | on a subgraph's node, name the subgraph                        |
 
 The mouse chooses as the keys do: a node dragged moves, the canvas dragged looks about, the
 wheel scrolls and, with Control, zooms, as a touchpad's pinch does.  A double click does what
@@ -55,33 +60,53 @@ wheel scrolls and, with Control, zooms, as a touchpad's pinch does.  A double cl
 
 A text of many lines is edited in a buffer of its own, =C-c C-c= setting it.  A choice of an
 image to load, as LoadImage's, offers to upload one of this machine's.  A seed changes after each
-run as its control says, randomized by default, as in ComfyUI.
+run as its control says, randomized by default, as in ComfyUI.  A prompt's ={a|b}= is a choice
+made at random each run, as ComfyUI's dynamic prompts are; ~//~ and ~/* */~ are comments.
+
+* Subgraphs
+
+A subgraph is a graph of nodes made one node, as in ComfyUI.  =C-M-d= enters the subgraph of the
+node chosen, as =C-M-d= goes down into a list; inside, a node on the left stands for its inputs, one
+on the right for its outputs, linked to like any other, a link to /New input of the subgraph/ or
+/New output of the subgraph/ making one; =d= on one of them takes it away, =t= names it.  What
+changes inside changes in all the subgraph's nodes.  An input linked to a widget inside is a widget
+of the subgraph's nodes, each holding its own value.  =C-M-u= leaves.  =m= marks nodes and =G=
+makes a subgraph of them; =X= puts the nodes of a subgraph's node back in its place.
 
 * What runs
 
 The workflow is turned into the prompt ComfyUI's server runs as its frontend turns it: widgets
 named after their node type's inputs, links followed through reroutes and bypassed nodes, notes
-and muted nodes left out.  The workflow goes with the prompt, so the images made keep it, as
-those made in ComfyUI's frontend do.  The conversion was checked against the prompts ComfyUI's
-frontend had made of the workflows kept in a hundred of its images.
+and muted nodes left out, the nodes inside subgraphs numbered with the path to them, as =12:5=,
+dynamic prompts chosen.  A workflow saved by an older frontend is read as the current one reads
+it: its subgraphs' proxyWidgets become inputs, nodes numbered twice are numbered anew.  The
+workflow goes with the prompt, so the images made keep it, as those made in ComfyUI's frontend
+do.
+
+The conversion was checked against ComfyUI's frontend itself, 1.53.6, which turned the 563
+workflow templates of its server and a library of 45 workflows into prompts: of their 7567
+nodes, 7466 come out the same.  The others are what the JavaScript of the frontend's extensions
+adds, as the 3D nodes' viewport and CustomCombo's options, which the server lets go, and a few
+nodes whose widgets the frontend itself mixes up.  Its dynamic prompts were checked against its
+own parser, the same choices made.
 
 What the frontend's extensions draw or do, the JavaScript of custom nodes, is not here: their
-nodes are drawn with their widgets as their types declare them.  Subgraphs, and wildcards such as
-={a|b}= in prompts, which the frontend expands, are not yet either.
+nodes are drawn with their widgets as their types declare them.
 
 * LispM's agents
 
 With [[https://github.com/LispMachineLab/lispm-agent][LispM Agent]], its agents work on the workflow shown, with tools they find by searching for
 "comfyui": =comfyui_workflow= reads it, node by node; =comfyui_node_types= finds the server's
 node types and tells their inputs and outputs; =comfyui_edit= changes it, as the user would, all
-of a change or none of it, one step to undo; =comfyui_run= runs it and gives the agent the images
+of a change or none of it, one step to undo, inside subgraphs too, and makes and unpacks them; =comfyui_run= runs it and gives the agent the images
 it made; =comfyui_open= and =comfyui_save= open and save the library's workflows.
 
 * Tests
 
 =make test compile= runs the tests and byte-compiles the files, warnings as errors.  No test
 speaks to a server: [[file:test/object-info.json][test/object-info.json]] holds what one says of a few node types, and
-[[file:test/workflow.json][test/workflow.json]] is ComfyUI's first workflow, with a reroute, a bypassed node and a note.
+[[file:test/workflow.json][test/workflow.json]] is ComfyUI's first workflow, with a reroute, a bypassed node and a note;
+subgraphs are made of it in the tests.
 websocket.el is found in package.el's directory, or named by ~WEBSOCKET~; LispM Kit is a checkout
 beside this one, or named by ~LISPM_KIT~.  With LispM Agent's =lisp/= beside this checkout, or
 named by ~LISPM_AGENT~, the tests of the agents' tools run too.

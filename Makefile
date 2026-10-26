@@ -12,7 +12,8 @@ LISPM_AGENT ?= ../lisp_machine/lisp
 LOAD_PATH = -L . -L $(LISPM_KIT) $(foreach dir,$(WEBSOCKET),-L $(dir)) \
 	$(foreach dir,$(wildcard $(LISPM_AGENT)),-L $(dir))
 
-FILES = lispm-comfyui-graph.el lispm-comfyui-client.el lispm-comfyui-canvas.el lispm-comfyui.el
+FILES = lispm-comfyui-graph.el lispm-comfyui-prompt.el lispm-comfyui-client.el lispm-comfyui-canvas.el \
+	lispm-comfyui.el
 TOOLS = lispm-comfyui-tools.el
 
 .PHONY: test compile
