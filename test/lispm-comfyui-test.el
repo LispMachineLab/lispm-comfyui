@@ -573,6 +573,86 @@ inner nodes numbered as outer ones renumbered, proxyWidgets made inputs."
       (lispm-comfyui-unpack-subgraph)
       (should (= (length (lispm-comfyui-graph-nodes lispm-comfyui--root)) 11)))))
 
+;;;; Settings
+
+(defmacro lispm-comfyui-test--with-settings (answer &rest body)
+  "Run BODY with settings of its own, the server answering ANSWER.
+ANSWER is what /system_stats answers, or a string, the error.  What is
+saved is pushed onto `saved' instead."
+  (declare (indent 1))
+  `(let ((lispm-comfyui-url "http://comfy.test:8188")
+         (lispm-comfyui-dark t)
+         (lispm-comfyui-font "Sans")
+         (lispm-comfyui-settings--server nil)
+         (saved nil))
+     (cl-letf (((symbol-function 'lispm-comfyui-settings--save)
+                (lambda (variable value) (set variable value) (push (cons variable value) saved)))
+               ((symbol-function 'lispm-comfyui-request)
+                (lambda (_path callback &rest _)
+                  (if (stringp ,answer) (funcall callback nil ,answer) (funcall callback ,answer nil))))
+               ((symbol-function 'lispm-comfyui-types-of-server)
+                (lambda (callback &optional _again) (funcall callback (lispm-comfyui-test--types) nil)))
+               ((symbol-function 'lispm-comfyui-close-socket) #'ignore))
+       (unwind-protect (progn ,@body)
+         (when-let* ((buffer (get-buffer lispm-comfyui-settings-buffer-name)))
+           (kill-buffer buffer))))))
+
+(defconst lispm-comfyui-test--stats
+  '((system (comfyui_version . "0.37.0") (os . "linux"))
+    (devices . [((name . "cuda:0 Tesla V100-SXM3-32GB : cudaMallocAsync") (vram_total . 34359738368))]))
+  "What a server's /system_stats answers.")
+
+(ert-deftest lispm-comfyui-test-settings-window ()
+  "The settings show the server, asked at once, and the look."
+  (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
+    (with-current-buffer (lispm-comfyui-settings)
+      (should (eq major-mode 'lispm-comfyui-settings-mode))
+      (should (string-search "http://comfy.test:8188" (buffer-string)))
+      (should (string-search "ComfyUI 0.37.0, Tesla V100-SXM3-32GB, 32 GB, 14 node types" (buffer-string)))
+      (should (string-search "Dark, as ComfyUI's" (buffer-string)))
+      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'address))
+      (lispm-comfyui-settings-next)
+      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'test))
+      (lispm-comfyui-settings-next)
+      (lispm-comfyui-settings-next)
+      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'colours))
+      (lispm-comfyui-settings-act)
+      (should-not lispm-comfyui-dark)
+      (should (equal saved '((lispm-comfyui-dark))))
+      (should (string-search "Emacs's colours" (buffer-string)))
+      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'colours))
+      (lispm-comfyui-settings-previous)
+      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'open)))))
+
+(ert-deftest lispm-comfyui-test-settings-address ()
+  "An address is checked, made whole, saved, and the server asked."
+  (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
+    (lispm-comfyui-settings)
+    (lispm-comfyui-settings-address "comfy.lan:8188/")
+    (should (equal lispm-comfyui-url "http://comfy.lan:8188"))
+    (should (equal (car saved) '(lispm-comfyui-url . "http://comfy.lan:8188")))
+    (should (eq (plist-get lispm-comfyui-settings--server :state) 'answered))
+    (should-error (lispm-comfyui-settings-address "http://comfy.lan:8188/a/path") :type 'user-error)
+    (should-error (lispm-comfyui-settings-address "ftp://comfy.lan") :type 'user-error)
+    (should (equal lispm-comfyui-url "http://comfy.lan:8188"))))
+
+(ert-deftest lispm-comfyui-test-settings-no-answer ()
+  "A server not answering is said to."
+  (lispm-comfyui-test--with-settings "Connection refused"
+    (with-current-buffer (lispm-comfyui-settings)
+      (should (eq (plist-get lispm-comfyui-settings--server :state) 'failed))
+      (should (string-search "No answer: Connection refused" (buffer-string))))))
+
+(ert-deftest lispm-comfyui-test-canvas-message ()
+  "What the canvas has to say is said over it, as the server not answering."
+  (let* ((types (lispm-comfyui-test--types))
+         (graph (lispm-comfyui-test--graph))
+         (svg (lispm-comfyui-canvas-svg
+               (list :graph graph :types types :layout (lispm-comfyui-canvas-layout graph types)
+                     :view '(0 0 1.0) :message "Cannot reach the server: , opens Settings")
+               800 600)))
+    (should (string-search "Cannot reach the server: , opens Settings" svg))))
+
 ;;;; The client
 
 (ert-deftest lispm-comfyui-test-preview-messages ()

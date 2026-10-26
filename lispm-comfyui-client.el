@@ -42,6 +42,7 @@
 (require 'url)
 (require 'url-http)
 (require 'url-util)
+(require 'url-parse)
 (require 'websocket)
 (require 'lispm-comfyui-graph)
 
@@ -115,14 +116,26 @@ answer that is an error still comes, read, with its message."
                                 ((plist-get status :error)
                                  (if (and code (>= code 400))
                                      (lispm-comfyui--error-message code value body)
-                                   (format "%s: %s" url (error-message-string
-                                                         (plist-get status :error)))))
+                                   (lispm-comfyui--network-error url (plist-get status :error))))
                                 ((and code (>= code 400))
                                  (lispm-comfyui--error-message code value body)))))
                    (funcall callback value problem))
                (when (buffer-live-p buffer) (kill-buffer buffer)))))
          nil t t)
-      (error (funcall callback nil (format "%s: %s" url (error-message-string err)))))))
+      (error (funcall callback nil (lispm-comfyui--network-error url err))))))
+
+(defun lispm-comfyui--network-error (url err)
+  "What ERR, reaching URL, means, in a few words."
+  (let* ((parsed (url-generic-parse-url url))
+         (place (format "%s:%s" (url-host parsed) (url-port parsed)))
+         (text (error-message-string err)))
+    (cond ((eq (car-safe (cdr-safe err)) 'connection-failed)
+           (format "nothing answers at %s" place))
+          ((string-match-p "not known\\|nodename\\|Name or service\\|lookup" text)
+           (format "no host is called %s" (url-host parsed)))
+          ((string-match-p "refused" text) (format "nothing answers at %s" place))
+          ((string-match-p "timed out\\|timeout" text) (format "%s does not answer in time" place))
+          (t (string-trim text)))))
 
 (defun lispm-comfyui--error-message (code value body)
   "What the server meant by its answer CODE, VALUE read, BODY as sent."

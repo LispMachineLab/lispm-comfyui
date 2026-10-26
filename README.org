@@ -1,4 +1,4 @@
-#+title: LispM ComfyUI
+#+title: LispM-ComfyUI
 
 #+HTML: <p align="center"><a href="https://github.com/LispMachineLab/lispm-comfyui/actions/workflows/test.yml"><img src="https://github.com/LispMachineLab/lispm-comfyui/actions/workflows/test.yml/badge.svg" alt="test" /></a></p>
 
@@ -11,10 +11,10 @@ and works in any Emacs 30.1 or later that draws SVG.  In code, the prefix is ~li
 
 * What it needs
 
-- *A ComfyUI server*, at ~lispm-comfyui-url~, =http://127.0.0.1:8188= by default: ComfyUI's own
-  address.  A server on another machine of the network is reached where it listens, as through a
-  reverse proxy that passes WebSockets on; ~lispm-comfyui-headers~ adds what such a proxy asks
-  for, as a password.
+- *A ComfyUI server*, which LispM-ComfyUI is not: ComfyUI itself, run on this machine or another,
+  at =http://127.0.0.1:8188= by default, its own address.  The settings, =,=, change it.  A server
+  on another machine of the network is reached where it listens, as through a reverse proxy that
+  passes WebSockets on; ~lispm-comfyui-headers~ adds what such a proxy asks for, as a password.
 - *websocket*, Emacs's WebSocket client, from GNU ELPA, over which the server tells what it runs.
   The App Store installs it, as package.el does.
 - *lispm-kit*, [[https://github.com/LispMachineLab/lispm-kit][LispM Kit]], with which the window declares each command once: its keys, its menu
@@ -48,6 +48,7 @@ library.  A node is chosen, and one of its items: its title, an input, an output
 | =s= =S=                           | save the workflow in the server's library, under another name |
 | =o= =O= =N=                       | open a workflow of the library, of a file, a new one          |
 | =g=                               | read the server's node types again                             |
+| =,=                               | the settings: the server, the colours, the font                |
 | =C-M-d= =>=, =C-M-u= =<=          | enter the subgraph of the node chosen, leave it                |
 | =m= =M-m=                         | mark the node chosen, or no longer; mark none                  |
 | =G=                               | make a subgraph of the nodes marked, or of the node chosen     |
@@ -62,6 +63,16 @@ A text of many lines is edited in a buffer of its own, =C-c C-c= setting it.  A 
 image to load, as LoadImage's, offers to upload one of this machine's.  A seed changes after each
 run as its control says, randomized by default, as in ComfyUI.  A prompt's ={a|b}= is a choice
 made at random each run, as ComfyUI's dynamic prompts are; ~//~ and ~/* */~ are comments.
+
+* Settings
+
+=,= shows LispM-ComfyUI's settings in a window of their own: the ComfyUI server's address, the
+server asked at once whether it answers, with its version, its GPU and how many node types it
+has; its own page, ComfyUI's frontend, to open; whether workflows are drawn dark, as ComfyUI's,
+or in Emacs's colours; and the fonts they are drawn with.  =n= and =p= go from setting to
+setting, =RET= changes the one at point, =q= goes back.  What is changed is saved with
+Customize and the workflows open are drawn anew.  When the server does not answer, the
+workflow's window says so, and that =,= opens the settings.
 
 * Subgraphs
 

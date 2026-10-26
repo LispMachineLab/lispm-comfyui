@@ -56,6 +56,7 @@
 (require 'lispm-comfyui-prompt)
 (require 'lispm-comfyui-client)
 (require 'lispm-comfyui-canvas)
+(require 'lispm-comfyui-settings)
 
 ;; An Emacs built without images, as one running tests, has none.
 (declare-function image-flush "image.c" (spec &optional frame))
@@ -178,7 +179,8 @@ An empty table until the server's are read."
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
            (setq lispm-comfyui--status
-                 (if types nil (format "Cannot reach %s: %s" lispm-comfyui-url error)))
+                 (if types nil (format "Cannot reach %s: %s.  Press , for Settings"
+                                       lispm-comfyui-url error)))
            (lispm-comfyui--draw-soon))))
      again)))
 
@@ -187,10 +189,11 @@ An empty table until the server's are read."
   (or (lispm-comfyui-cached-types)
       (let ((done nil) (failure nil))
         (lispm-comfyui-types-of-server (lambda (types error) (setq done (or types t) failure error)))
-        (with-timeout (60 (user-error "The server at %s did not answer" lispm-comfyui-url))
+        (with-timeout (60 (user-error "The server at %s did not answer.  Press , for Settings"
+                                      lispm-comfyui-url))
           (while (not done) (accept-process-output nil 0.05)))
         (unless (lispm-comfyui-cached-types)
-          (user-error "Cannot reach %s: %s" lispm-comfyui-url failure))))
+          (user-error "Cannot reach %s: %s.  Press , for Settings" lispm-comfyui-url failure))))
   (lispm-comfyui--types))
 
 ;;;; The workflow and its subgraphs
@@ -364,6 +367,12 @@ input image it loads."
                        :executing (and lispm-comfyui--executing
                                        (lispm-comfyui--local-id lispm-comfyui--executing))
                        :progress lispm-comfyui--progress
+                       :message (unless (lispm-comfyui-cached-types)
+                                  (if (and lispm-comfyui--status
+                                           (string-prefix-p "Cannot reach" lispm-comfyui--status))
+                                      (format "Cannot reach the ComfyUI server at %s.  Press , for Settings."
+                                              lispm-comfyui-url)
+                                    "Reading the server's node types…"))
                        :errors (cl-loop for (key . message) in lispm-comfyui--errors
                                         for local = (lispm-comfyui--local-id key)
                                         when local collect (cons local message)))
@@ -1770,6 +1779,8 @@ A node of it takes their place, linked as they were."
   "---"
   (lispm-comfyui-reload :key "g" :help "Read the server's node types again"
                         :label "Read Node Types Again")
+  (lispm-comfyui-settings :key "," :help "The ComfyUI server, the colours, the font"
+                          :label "Settings…" :button "Settings")
   :menu "Edit"
   (lispm-comfyui-undo :key ("u" "C-/" "C-_" "C-x u") :help "Undo the last change" :label "Undo")
   (lispm-comfyui-redo :key ("U" "C-?" "M-_") :help "Redo the change undone" :label "Redo")
