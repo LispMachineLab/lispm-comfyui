@@ -1,0 +1,43 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Emacs ${{ matrix.emacs }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs: ['30.1', '31.1']
+    steps:
+      - uses: actions/checkout@v7
+      # LispM Kit, with which the window declares its commands.
+      - uses: actions/checkout@v7
+        with:
+          repository: LispMachineLab/lispm-kit
+          path: .deps/lispm-kit
+      # The agent whose tools the application adds to, for their tests.
+      - uses: actions/checkout@v7
+        with:
+          repository: LispMachineLab/lispm-agent
+          path: .deps/lispm-agent
+      - uses: purcell/setup-emacs@v8.0
+        with:
+          version: ${{ matrix.emacs }}
+      # websocket.el, from GNU ELPA.
+      - name: websocket
+        run: >-
+          emacs -Q --batch --eval "(progn (setq package-user-dir (expand-file-name \".deps/elpa\")
+          package-archives '((\"gnu\" . \"https://elpa.gnu.org/packages/\")))
+          (package-initialize) (package-refresh-contents) (package-install 'websocket))"
+      - name: Test
+        run: >-
+          make test compile LISPM_AGENT=.deps/lispm-agent/lisp LISPM_KIT=.deps/lispm-kit
+          WEBSOCKET=$(ls -d .deps/elpa/websocket-*/)
