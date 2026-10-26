@@ -473,7 +473,8 @@ canvas is; :selected, the node chosen, and :focus, the index of its
 item chosen; :executing, the number of the node running, a string;
 :progress, (DONE . OF) for it; and :errors, an alist from node
 numbers, strings, to what went wrong there; :marked, the numbers of the
-nodes marked.  PALETTE is a plist of
+nodes marked; :message, what to say over the canvas, as that the
+server does not answer.  PALETTE is a plist of
 colours and :font, `lispm-comfyui-canvas-palette' by default."
   (let* ((palette (or palette lispm-comfyui-canvas-palette))
          (graph (plist-get state :graph))
@@ -512,11 +513,15 @@ colours and :font, `lispm-comfyui-canvas-palette' by default."
      (mapconcat (lambda (place) (lispm-comfyui-canvas--node place types state palette))
                 layout "")
      "</g>"
-     (if (lispm-comfyui-graph-nodes graph) ""
-       (lispm-comfyui-canvas--text (/ width 2.0) (/ height 2.0)
-                                   "An empty workflow: a to add a node, o to open one"
-                                   :fill (plist-get palette :dim) :font-size 15
-                                   :text-anchor "middle"))
+     (let ((message (or (plist-get state :message)
+                        (unless (lispm-comfyui-graph-nodes graph)
+                          "An empty workflow: a to add a node, o to open one"))))
+       (if (null message) ""
+         (lispm-comfyui-canvas--text (/ width 2.0)
+                                     (if (lispm-comfyui-graph-nodes graph) 28 (/ height 2.0))
+                                     message
+                                     :fill (plist-get palette (if (plist-get state :message) :error :dim))
+                                     :font-size 15 :text-anchor "middle")))
      "</svg>")))
 
 (provide 'lispm-comfyui-canvas)
