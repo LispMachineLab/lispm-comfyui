@@ -74,6 +74,11 @@ setting, =RET= changes the one at point, =q= goes back.  What is changed is save
 Customize and the workflows open are drawn anew.  When the server does not answer, the
 workflow's window says so, and that =,= opens the settings.
 
+On macOS, an application reaches the other machines of the local network only once allowed there,
+in System Settings › Privacy & Security › Local Network.  When macOS keeps LispM off it, a
+server on another machine cannot be reached, and LispM-ComfyUI says so, and where to allow it,
+instead of saying the server does not answer.
+
 * Subgraphs
 
 A subgraph is a graph of nodes made one node, as in ComfyUI.  =C-M-d= enters the subgraph of the

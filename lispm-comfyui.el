@@ -1481,7 +1481,10 @@ as `lispm-comfyui--runs' holds."
                      (lispm-comfyui-graph-json copy)))
          (buffer (current-buffer)))
     (unless prompt (user-error "The workflow has no node that runs"))
-    (lispm-comfyui-connect-socket)
+    (condition-case err
+        (lispm-comfyui-connect-socket)
+      (error (user-error "Cannot reach %s: %s.  Press , for Settings"
+                         lispm-comfyui-url (lispm-comfyui--network-error lispm-comfyui-url err))))
     (setq lispm-comfyui--errors nil
           lispm-comfyui--status "Queueing…")
     (lispm-comfyui--draw-soon)
