@@ -129,13 +129,79 @@ answer that is an error still comes, read, with its message."
   (let* ((parsed (url-generic-parse-url url))
          (place (format "%s:%s" (url-host parsed) (url-port parsed)))
          (text (error-message-string err)))
-    (cond ((eq (car-safe (cdr-safe err)) 'connection-failed)
+    (cond ((lispm-comfyui--off-local-network-p url err)
+           (let ((name (lispm-comfyui--application-name)))
+             (format "macOS keeps %s off the local network: turn %s on in System Settings › Privacy & Security › Local Network"
+                     name name)))
+          ((eq (car-safe (cdr-safe err)) 'connection-failed)
            (format "nothing answers at %s" place))
           ((string-match-p "not known\\|nodename\\|Name or service\\|lookup" text)
            (format "no host is called %s" (url-host parsed)))
           ((string-match-p "refused" text) (format "nothing answers at %s" place))
           ((string-match-p "timed out\\|timeout" text) (format "%s does not answer in time" place))
           (t (string-trim text)))))
+
+;; macOS lets an application reach the other machines of the local network
+;; only once allowed there, in System Settings; until then, and while its
+;; question waits, each connection there fails at once as "No route to
+;; host".  url.el tells only that it "could not create connection", so a
+;; connection that failed is tried again, without waiting, to learn why.
+
+(defun lispm-comfyui--off-local-network-p (url err)
+  "Non-nil when ERR, reaching URL, is macOS keeping Emacs off the local network."
+  (and (eq system-type 'darwin)
+       (or (eq (car-safe (cdr-safe err)) 'connection-failed)
+           (string-match-p "create connection\\|client process failed\\|No route to host"
+                           (error-message-string err)))
+       (pcase-let ((`(,host . ,port) (lispm-comfyui--failed-place url err)))
+         (and host (lispm-comfyui--local-host-p host)
+              (equal (lispm-comfyui--refused-at-once host port) "No route to host")))))
+
+(defun lispm-comfyui--failed-place (url err)
+  "The host and port, (HOST . PORT), ERR failed to reach URL at.
+A proxy's, when url.el went through one."
+  (let ((text (error-message-string err))
+        (parsed (url-generic-parse-url url)))
+    (cond ((memq :host err) (cons (cadr (memq :host err)) (cadr (memq :service err))))
+          ((string-match "connection to \\(.+\\):\\([0-9]+\\)" text)
+           (cons (match-string 1 text) (string-to-number (match-string 2 text))))
+          (t (cons (url-host parsed) (url-port parsed))))))
+
+(defun lispm-comfyui--local-host-p (host)
+  "Non-nil when HOST is a machine of the local network: a .local name, or
+one at an address of a private or link-local network."
+  (or (string-suffix-p ".local" (downcase host))
+      (seq-some #'lispm-comfyui--local-address-p
+                (ignore-errors (network-lookup-address-info host)))))
+
+(defun lispm-comfyui--local-address-p (address)
+  "Non-nil when ADDRESS, a vector as `network-lookup-address-info' gives,
+is of a private or link-local network."
+  (let ((a (aref address 0)))
+    (if (= (length address) 5)
+        (let ((b (aref address 1)))
+          (or (= a 10) (and (= a 172) (<= 16 b 31)) (and (= a 192) (= b 168))
+              (and (= a 169) (= b 254))))
+      (or (= (logand a #xffc0) #xfe80) (= (logand a #xfe00) #xfc00)))))
+
+(defun lispm-comfyui--refused-at-once (host port)
+  "Why a connection to HOST at PORT fails at once, as \"No route to host\".
+Nil when it does not: the connection is tried without waiting and let go."
+  (condition-case err
+      (let ((process (make-network-process :name " *lispm-comfyui-probe*" :host host
+                                           :service port :nowait t :noquery t)))
+        (unwind-protect
+            (and (eq (process-status process) 'failed)
+                 (let ((why (process-exit-status process)))
+                   (and (consp why) (stringp (nth 2 why)) (nth 2 why))))
+          (delete-process process)))
+    (file-error (and (stringp (nth 2 err)) (nth 2 err)))))
+
+(defun lispm-comfyui--application-name ()
+  "The name of the application this Emacs runs as, as LispM, else Emacs."
+  (if (string-match "\\([^/]+\\)\\.app/Contents/MacOS/?\\'" (or invocation-directory ""))
+      (match-string 1 invocation-directory)
+    "Emacs"))
 
 (defun lispm-comfyui--error-message (code value body)
   "What the server meant by its answer CODE, VALUE read, BODY as sent."

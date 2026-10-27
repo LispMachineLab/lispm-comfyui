@@ -685,6 +685,51 @@ saved is pushed onto `saved' instead."
                  "Prompt outputs failed validation"))
   (should (equal (lispm-comfyui--error-message 404 nil "404: Not Found") "The server answered 404: 404: Not Found")))
 
+(ert-deftest lispm-comfyui-test-local-network ()
+  "macOS keeping Emacs off the local network is told, and where to allow it."
+  (should (lispm-comfyui--local-address-p [192 168 1 192 0]))
+  (should (lispm-comfyui--local-address-p [172 20 0 1 0]))
+  (should (lispm-comfyui--local-address-p [#xfe80 0 0 0 0 0 0 1 0]))
+  (should-not (lispm-comfyui--local-address-p [172 32 0 1 0]))
+  (should-not (lispm-comfyui--local-address-p [8 8 8 8 0]))
+  (should-not (lispm-comfyui--local-address-p [#x2001 #xdb8 0 0 0 0 0 1 0]))
+  (should (lispm-comfyui--local-host-p "comfy.example.local"))
+  (should-not (lispm-comfyui--local-host-p "127.0.0.1"))
+  (let ((invocation-directory "/Applications/LispM.app/Contents/MacOS/"))
+    (should (equal (lispm-comfyui--application-name) "LispM")))
+  (let ((invocation-directory "/usr/local/bin/"))
+    (should (equal (lispm-comfyui--application-name) "Emacs")))
+  (should (equal (lispm-comfyui--failed-place
+                  "http://192.168.1.192:8188"
+                  '(error "Could not create connection to 127.0.0.1:6152"))
+                 '("127.0.0.1" . 6152)))
+  (should (equal (lispm-comfyui--failed-place
+                  "http://192.168.1.192:8188"
+                  '(file-error "make client process failed" "No route to host"
+                               :name "x" :host "192.168.1.192" :service 8188))
+                 '("192.168.1.192" . 8188)))
+  (let ((tried nil)
+        (invocation-directory "/Applications/LispM.app/Contents/MacOS/")
+        (err '(error "Could not create connection to 192.168.1.192:8188")))
+    (cl-letf (((symbol-function 'lispm-comfyui--refused-at-once)
+               (lambda (host port) (push (cons host port) tried) "No route to host")))
+      (let ((system-type 'darwin))
+        (should (equal (lispm-comfyui--network-error "http://192.168.1.192:8188" err)
+                       "macOS keeps LispM off the local network: turn LispM on in System Settings › Privacy & Security › Local Network"))
+        (should (equal tried '(("192.168.1.192" . 8188))))
+        ;; Not a machine of the local network: not macOS's doing.
+        (should-not (string-prefix-p "macOS" (lispm-comfyui--network-error
+                                              "http://192.0.2.1:8188"
+                                              '(error "Could not create connection to 192.0.2.1:8188")))))
+      (let ((system-type 'gnu/linux))
+        (should-not (string-prefix-p "macOS" (lispm-comfyui--network-error "http://192.168.1.192:8188" err))))))
+  ;; Tried at once, a connection that does not fail at once is let go.
+  (let ((server (make-network-process :name "lispm-comfyui-test-server" :server t
+                                      :host "127.0.0.1" :service t :noquery t)))
+    (unwind-protect
+        (should-not (lispm-comfyui--refused-at-once "127.0.0.1" (process-contact server :service)))
+      (delete-process server))))
+
 ;;;; The agents' tools
 
 (when (require 'lispm-tools nil t)
