@@ -1,4 +1,4 @@
-;;; lispm-comfyui-settings.el --- LispM-ComfyUI's settings, in a window  -*- lexical-binding: t; -*-
+;;; lispm-comfyui-settings.el --- LispM-ComfyUI's settings, in a form  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026  Ryan.K
 
@@ -23,54 +23,43 @@
 
 ;;; Commentary:
 
-;; LispM-ComfyUI's settings, in a window of their own, which , opens
-;; from a workflow: the ComfyUI server it works with, asked at once
-;; whether it answers, and what it is; the colours and the font
-;; workflows are drawn with.  Each line is a setting: n and p go from
-;; one to the next, RET changes the one at point, and its key changes it
-;; from anywhere in the window.  What is changed is saved with
-;; Customize, for next time, and the workflows open are drawn anew.
+;; LispM-ComfyUI's settings, which , opens from a workflow, are a form
+;; of LispM's (lispm-form.el), shown in the workflow's window as a dialog
+;; is: the ComfyUI server's address in a text field, a Test Connection
+;; button asking the server at the address typed whether it answers,
+;; and what it is, said under the field, an Open ComfyUI's Page button;
+;; the colours workflows are drawn in, radio buttons, and their fonts,
+;; a text field.  Save keeps them with Customize, for next time, and
+;; draws the workflows open anew; Cancel leaves them as they were.
+;;
+;; Where LispM's forms are not, in an Emacs of its own, the settings are
+;; Customize's.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
 (require 'url-parse)
-(require 'lispm-kit-commands)
 (require 'lispm-comfyui-client)
+(require 'lispm-form nil t)
 
 (defvar lispm-comfyui-dark)
 (defvar lispm-comfyui-font)
+(defvar lispm-form-types)
+(declare-function lispm-form "lispm-form" (title fields &rest keys))
+(declare-function lispm-form-value "lispm-form" (key))
+(declare-function lispm-form-redraw "lispm-form" ())
 (declare-function lispm-comfyui--canvas-buffers "lispm-comfyui")
 (declare-function lispm-comfyui-reload "lispm-comfyui")
 (declare-function lispm-comfyui--draw "lispm-comfyui")
 
-(defconst lispm-comfyui-settings-buffer-name "*LispM-ComfyUI Settings*"
-  "The name of the settings' buffer.")
-
-(defface lispm-comfyui-settings-heading '((t :inherit bold))
-  "Face of the settings' headings."
-  :group 'lispm-comfyui)
-
-(defface lispm-comfyui-settings-good '((t :inherit success))
-  "Face of what goes well, as a server answering."
-  :group 'lispm-comfyui)
-
-(defface lispm-comfyui-settings-bad '((t :inherit error))
-  "Face of what goes wrong, as a server not answering."
-  :group 'lispm-comfyui)
-
-(defface lispm-comfyui-settings-dim '((t :inherit shadow))
-  "Face of what is said of a setting."
-  :group 'lispm-comfyui)
+(defconst lispm-comfyui-settings-title "LispM-ComfyUI Settings"
+  "The title of the settings' form.")
 
 (defvar lispm-comfyui-settings--server nil
   "What the server said when last asked: a plist.
 :state is `asking', `answered' or `failed'; :url, the address asked;
 :version, :device and :types, what it is; :error, what went wrong.")
-
-(defvar-local lispm-comfyui-settings--back nil
-  "The buffer the settings were opened from, to go back to.")
 
 ;;;; Saving
 
@@ -85,6 +74,22 @@
       (if again (lispm-comfyui-reload) (lispm-comfyui--draw)))))
 
 ;;;; The server
+
+(defun lispm-comfyui-settings--address (text)
+  "TEXT, typed as a server's address, as http://HOST:PORT; or nil.
+A missing http:// is added and a slash at the end dropped."
+  (when text
+    (let ((address (string-remove-suffix "/" (string-trim text))))
+      (unless (string-match-p "\\`[a-z]+://" address)
+        (setq address (concat "http://" address)))
+      (and (lispm-comfyui-settings--address-p address) address))))
+
+(defun lispm-comfyui-settings--address-p (address)
+  "Non-nil if ADDRESS is a server's address, http or https, host and port."
+  (let ((url (url-generic-parse-url address)))
+    (and (member (url-type url) '("http" "https"))
+         (not (string-empty-p (or (url-host url) "")))
+         (member (url-filename url) '("" "/")))))
 
 (defun lispm-comfyui-settings--device (stats)
   "What STATS, the server's /system_stats, say of its first device, or nil."
@@ -101,212 +106,130 @@
                   (format ", %d GB" (round memory 1073741824))
                 "")))))
 
-(defun lispm-comfyui-settings-test ()
-  "Ask the server whether it answers, and what it is."
-  (interactive)
-  (let ((url lispm-comfyui-url))
-    (setq lispm-comfyui-settings--server (list :state 'asking :url url))
-    (lispm-comfyui-settings--refresh)
-    (lispm-comfyui-request
-     "/system_stats"
-     (lambda (stats error)
-       (when (equal url lispm-comfyui-url)
-         (if (or error (not (consp stats)))
-             (setq lispm-comfyui-settings--server
-                   (list :state 'failed :url url :error (or error "it answered nothing ComfyUI says")))
-           (setq lispm-comfyui-settings--server
-                 (list :state 'answered :url url
-                       :version (alist-get 'comfyui_version (alist-get 'system stats))
-                       :device (lispm-comfyui-settings--device stats)))
-           (lispm-comfyui-types-of-server
-            (lambda (types _error)
-              (when (and types (equal url lispm-comfyui-url))
-                (setq lispm-comfyui-settings--server
-                      (plist-put lispm-comfyui-settings--server :types (hash-table-count types)))
-                (lispm-comfyui-settings--refresh)))
-            t))
-         (lispm-comfyui-settings--refresh))))))
+(defun lispm-comfyui-settings-test (&optional address then)
+  "Ask the server at ADDRESS, by default the one set, whether it answers.
+What it says is kept in `lispm-comfyui-settings--server'; THEN, if
+given, is called with no argument each time that changes."
+  (let ((url (or address lispm-comfyui-url)))
+    (cl-flet ((stands (server)
+                (when (equal (plist-get lispm-comfyui-settings--server :url) url)
+                  (setq lispm-comfyui-settings--server server)
+                  (when then (funcall then)))))
+      (setq lispm-comfyui-settings--server (list :state 'asking :url url))
+      (when then (funcall then))
+      (let ((lispm-comfyui-url url))
+        (lispm-comfyui-request
+         "/system_stats"
+         (lambda (stats error)
+           (if (or error (not (consp stats)))
+               (stands (list :state 'failed :url url
+                             :error (or error "it answered nothing ComfyUI says")))
+             (stands (list :state 'answered :url url
+                           :version (alist-get 'comfyui_version (alist-get 'system stats))
+                           :device (lispm-comfyui-settings--device stats)))
+             ;; How many node types it has, read apart: the address
+             ;; may not be the one whose types the workflows use.
+             (let ((lispm-comfyui-url url))
+               (lispm-comfyui-request
+                "/object_info"
+                (lambda (info _error)
+                  (when (and (consp info) (eq (plist-get lispm-comfyui-settings--server :state) 'answered))
+                    (stands (plist-put (copy-sequence lispm-comfyui-settings--server)
+                                       :types (length info))))))))))))))
 
-(defun lispm-comfyui-settings--address-p (address)
-  "Non-nil if ADDRESS is a server's address, http or https, host and port."
-  (let ((url (url-generic-parse-url address)))
-    (and (member (url-type url) '("http" "https"))
-         (not (string-empty-p (or (url-host url) "")))
-         (member (url-filename url) '("" "/")))))
-
-(defun lispm-comfyui-settings-address (address)
-  "Work with the ComfyUI server at ADDRESS, as http://HOST:PORT."
-  (interactive (list (read-string "ComfyUI server's address: " lispm-comfyui-url)))
-  (let ((address (string-remove-suffix "/" (string-trim address))))
-    (unless (string-match-p "\\`[a-z]+://" address)
-      (setq address (concat "http://" address)))
-    (unless (lispm-comfyui-settings--address-p address)
-      (user-error "A server's address is http://HOST:PORT, as http://127.0.0.1:8188"))
-    (lispm-comfyui-close-socket)
-    (lispm-comfyui-settings--save 'lispm-comfyui-url address)
-    (lispm-comfyui-settings-test)
-    (lispm-comfyui-settings--redraw-workflows t)))
-
-(defun lispm-comfyui-settings-open-server ()
-  "Open the server's own page, ComfyUI's frontend, in a browser."
-  (interactive)
-  (browse-url lispm-comfyui-url))
-
-;;;; The look
-
-(defun lispm-comfyui-settings-colours ()
-  "Draw workflows dark, as ComfyUI does, or in Emacs's colours, the other."
-  (interactive)
-  (lispm-comfyui-settings--save 'lispm-comfyui-dark (not lispm-comfyui-dark))
-  (lispm-comfyui-settings--redraw-workflows)
-  (lispm-comfyui-settings--refresh))
-
-(defun lispm-comfyui-settings-font (font)
-  "Draw workflows with FONT, fonts as SVG names them, the first found used."
-  (interactive (list (read-string "Fonts, the first found used: " lispm-comfyui-font)))
-  (when (string-blank-p font) (user-error "A font is needed"))
-  (lispm-comfyui-settings--save 'lispm-comfyui-font (string-trim font))
-  (lispm-comfyui-settings--redraw-workflows)
-  (lispm-comfyui-settings--refresh))
-
-;;;; The window
-
-(defun lispm-comfyui-settings--line (action label value &optional note)
-  "Insert a line of the setting ACTION: its LABEL, VALUE and NOTE."
-  (let ((start (point)))
-    (insert "  " (propertize label 'face 'lispm-comfyui-settings-dim)
-            (propertize " " 'display '(space :align-to 14))
-            value
-            (if note (concat "  " (propertize note 'face 'lispm-comfyui-settings-dim)) "")
-            "\n")
-    (put-text-property start (point) 'lispm-comfyui-setting action)))
-
-(defun lispm-comfyui-settings--server-text ()
-  "What the server said, as a line's value."
+(defun lispm-comfyui-settings--server-text (address)
+  "What the server at ADDRESS said when last asked, in a line."
   (let ((server lispm-comfyui-settings--server))
-    (if (not (equal (plist-get server :url) lispm-comfyui-url))
-        (propertize "not asked yet" 'face 'lispm-comfyui-settings-dim)
+    (if (not (equal (plist-get server :url) address))
+        "Not asked yet: Test Connection asks it."
       (pcase (plist-get server :state)
-        ('asking (propertize "Asking…" 'face 'lispm-comfyui-settings-dim))
+        ('asking "Asking the server…")
         ('answered
-         (concat (propertize "● " 'face 'lispm-comfyui-settings-good)
-                 (format "ComfyUI %s" (or (plist-get server :version) ""))
-                 (if (plist-get server :device) (concat ", " (plist-get server :device)) "")
-                 (if (plist-get server :types) (format ", %d node types" (plist-get server :types)) "")))
-        (_ (concat (propertize "○ " 'face 'lispm-comfyui-settings-bad)
-                   (propertize (format "No answer: %s" (plist-get server :error))
-                               'face 'lispm-comfyui-settings-bad)))))))
+         (concat "● ComfyUI " (or (plist-get server :version) "")
+                 (if (plist-get server :device) (concat " · " (plist-get server :device)) "")
+                 (if (plist-get server :types) (format " · %d node types" (plist-get server :types)) "")))
+        (_ (format "○ No answer: %s." (plist-get server :error)))))))
 
-(defun lispm-comfyui-settings--refresh ()
-  "Draw the settings anew, if they are shown, point kept on its setting."
-  (when-let* ((buffer (get-buffer lispm-comfyui-settings-buffer-name)))
-    (with-current-buffer buffer
-      (let ((setting (get-text-property (point) 'lispm-comfyui-setting))
-            (inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize "LispM-ComfyUI Settings" 'face '(lispm-comfyui-settings-heading (:height 1.2)))
-                "\n\n"
-                (propertize "Server" 'face 'lispm-comfyui-settings-heading) "\n")
-        (lispm-comfyui-settings--line 'address "Address" lispm-comfyui-url "a changes it")
-        (lispm-comfyui-settings--line 'test "Status" (lispm-comfyui-settings--server-text) "t asks again")
-        (lispm-comfyui-settings--line 'open "Its page" "ComfyUI's own frontend" "o opens it")
-        (insert "\n" (propertize "Look" 'face 'lispm-comfyui-settings-heading) "\n")
-        (lispm-comfyui-settings--line 'colours "Colours"
-                                      (if lispm-comfyui-dark "Dark, as ComfyUI's" "Emacs's colours")
-                                      "c changes them")
-        (lispm-comfyui-settings--line 'font "Font" lispm-comfyui-font "f changes it")
-        (insert "\n"
-                (propertize "Saved for next time.  RET changes the setting at point, q goes back to the workflow."
-                            'face 'lispm-comfyui-settings-dim)
-                "\n")
-        (goto-char (point-min))
-        (if-let* ((found (and setting (text-property-any (point-min) (point-max)
-                                                         'lispm-comfyui-setting setting))))
-            (goto-char found)
-          (lispm-comfyui-settings-next))))))
+;;;; The form
 
-(defun lispm-comfyui-settings-next ()
-  "Go to the next setting."
-  (interactive)
-  (let ((here (get-text-property (point) 'lispm-comfyui-setting))
-        (point (point)))
-    (when here
-      (setq point (or (next-single-property-change point 'lispm-comfyui-setting) (point-max))))
-    (when-let* ((next (text-property-not-all point (point-max) 'lispm-comfyui-setting nil)))
-      (goto-char next))))
+(defun lispm-comfyui-settings--typed-address ()
+  "The address typed in the form in this buffer, as http://HOST:PORT."
+  (or (lispm-comfyui-settings--address (lispm-form-value 'address))
+      (user-error "A server's address is http://HOST:PORT, as http://127.0.0.1:8188")))
 
-(defun lispm-comfyui-settings-previous ()
-  "Go to the previous setting."
-  (interactive)
-  (let ((start (or (previous-single-property-change (line-beginning-position) 'lispm-comfyui-setting)
-                   (point-min))))
-    (goto-char start)
-    (unless (get-text-property (point) 'lispm-comfyui-setting)
-      (when-let* ((previous (previous-single-property-change (point) 'lispm-comfyui-setting)))
-        (goto-char previous)))
-    (goto-char (line-beginning-position))))
+(defun lispm-comfyui-settings--test-typed ()
+  "Ask the server at the address typed whether it answers, and say so."
+  (let ((form (current-buffer)))
+    (lispm-comfyui-settings-test
+     (lispm-comfyui-settings--typed-address)
+     (lambda ()
+       (when (buffer-live-p form)
+         (with-current-buffer form (lispm-form-redraw)))))))
 
-(defun lispm-comfyui-settings-act ()
-  "Change the setting at point."
-  (interactive)
-  (pcase (get-text-property (point) 'lispm-comfyui-setting)
-    ('address (call-interactively #'lispm-comfyui-settings-address))
-    ('test (lispm-comfyui-settings-test))
-    ('open (lispm-comfyui-settings-open-server))
-    ('colours (lispm-comfyui-settings-colours))
-    ('font (call-interactively #'lispm-comfyui-settings-font))
-    (_ (lispm-comfyui-settings-next))))
+(defun lispm-comfyui-settings--open-typed ()
+  "Open the page of the server at the address typed, ComfyUI's frontend."
+  (browse-url (lispm-comfyui-settings--typed-address)))
 
-(defun lispm-comfyui-settings-back ()
-  "Go back to the workflow the settings were opened from."
-  (interactive)
-  (let ((back lispm-comfyui-settings--back))
-    (if (buffer-live-p back)
-        (switch-to-buffer back)
-      (quit-window))))
+(defun lispm-comfyui-settings--fields ()
+  "The fields of the settings' form.
+A LispM whose forms have no buttons, older than these settings, shows
+them without, and says under the address only how it is written."
+  (let ((buttons (memq 'buttons (bound-and-true-p lispm-form-types))))
+    `((server :type heading :label "Server")
+      (address :type text :label "Address" :required t
+               :validate ,(lambda (text)
+                            (unless (lispm-comfyui-settings--address text)
+                              "it is http://HOST:PORT, as http://127.0.0.1:8188"))
+               :help ,(if buttons
+                          (lambda (values)
+                            (lispm-comfyui-settings--server-text
+                             (lispm-comfyui-settings--address (alist-get 'address values))))
+                        "As http://HOST:PORT, the ComfyUI server's"))
+      ,@(when buttons
+          `((actions :type buttons
+                     :buttons (("Test Connection" . lispm-comfyui-settings--test-typed)
+                               ("Open ComfyUI's Page" . lispm-comfyui-settings--open-typed)))))
+      (look :type heading :label "Look")
+      (colours :type radio :label "Colours"
+               :choices ((dark . "Dark, as ComfyUI draws them") (emacs . "Emacs's own")))
+      (font :type text :label "Font" :required t
+            :help "Fonts as CSS names them, the first this computer has drawn"))))
 
-(lispm-kit-define-commands lispm-comfyui-settings-mode
-  (lispm-comfyui-settings-act :key "RET" :help "Change the setting at point")
-  (lispm-comfyui-settings-next :key ("n" "C-n" "<down>" "TAB") :help "Go to the next setting")
-  (lispm-comfyui-settings-previous :key ("p" "C-p" "<up>" "<backtab>")
-                                   :help "Go to the previous setting")
-  :menu "Settings"
-  (lispm-comfyui-settings-address :key "a" :help "Work with another ComfyUI server"
-                                  :label "Server Address…" :button "Server")
-  (lispm-comfyui-settings-test :key ("t" "g") :help "Ask the server whether it answers"
-                               :label "Ask the Server" :button "Test")
-  (lispm-comfyui-settings-open-server :key "o" :help "Open the server's own page"
-                                      :label "Open the Server's Page")
-  "---"
-  (lispm-comfyui-settings-colours :key "c" :help "Dark, as ComfyUI, or Emacs's colours"
-                                  :label "Dark Colours" :style toggle :selected lispm-comfyui-dark)
-  (lispm-comfyui-settings-font :key "f" :help "The fonts workflows are drawn with" :label "Font…")
-  "---"
-  (lispm-comfyui-settings-back :key ("q" "," "C-c C-c") :help "Go back to the workflow"
-                               :label "Back to the Workflow" :button "Done"))
-
-(define-derived-mode lispm-comfyui-settings-mode special-mode "LispM-ComfyUI Settings"
-  "LispM-ComfyUI's settings: the ComfyUI server, the colours, the font.
-\\{lispm-comfyui-settings-mode-map}"
-  (setq buffer-read-only t
-        truncate-lines t)
-  (setq-local revert-buffer-function (lambda (&rest _) (lispm-comfyui-settings-test))))
+(defun lispm-comfyui-settings--apply (values)
+  "Keep VALUES, of the settings' form, and draw the workflows open anew."
+  (let ((address (lispm-comfyui-settings--address (alist-get 'address values)))
+        (dark (eq (alist-get 'colours values) 'dark))
+        (font (alist-get 'font values))
+        (again nil))
+    (unless (equal address lispm-comfyui-url)
+      (lispm-comfyui-close-socket)
+      (lispm-comfyui-settings--save 'lispm-comfyui-url address)
+      (setq again t))
+    (unless (eq dark (and lispm-comfyui-dark t))
+      (lispm-comfyui-settings--save 'lispm-comfyui-dark dark))
+    (unless (equal font lispm-comfyui-font)
+      (lispm-comfyui-settings--save 'lispm-comfyui-font font))
+    (lispm-comfyui-settings--redraw-workflows again)))
 
 ;;;###autoload
 (defun lispm-comfyui-settings ()
-  "Show LispM-ComfyUI's settings, the server asked at once whether it answers."
+  "Show LispM-ComfyUI's settings in a form, the server asked at once.
+In an Emacs without LispM's forms, show Customize's."
   (interactive)
-  (let ((back (current-buffer))
-        (buffer (get-buffer-create lispm-comfyui-settings-buffer-name)))
-    (with-current-buffer buffer
-      (unless (derived-mode-p 'lispm-comfyui-settings-mode)
-        (lispm-comfyui-settings-mode))
-      (unless (eq back buffer)
-        (setq lispm-comfyui-settings--back back)))
-    (switch-to-buffer buffer)
-    (lispm-comfyui-settings--refresh)
-    (lispm-comfyui-settings-test)
-    buffer))
+  (if (not (fboundp 'lispm-form))
+      (customize-group 'lispm-comfyui)
+    (let ((buffer (or (get-buffer (format "*%s*" lispm-comfyui-settings-title))
+                      (lispm-form lispm-comfyui-settings-title (lispm-comfyui-settings--fields)
+                                  :values `((address . ,lispm-comfyui-url)
+                                            (colours . ,(if lispm-comfyui-dark 'dark 'emacs))
+                                            (font . ,lispm-comfyui-font))
+                                  :submit "Save"
+                                  :on-submit #'lispm-comfyui-settings--apply))))
+      (pop-to-buffer-same-window buffer)
+      (when (memq 'buttons (bound-and-true-p lispm-form-types))
+        (with-current-buffer buffer
+          (lispm-comfyui-settings--test-typed)))
+      buffer)))
 
 (provide 'lispm-comfyui-settings)
 ;;; lispm-comfyui-settings.el ends here
