@@ -575,26 +575,36 @@ inner nodes numbered as outer ones renumbered, proxyWidgets made inputs."
 
 ;;;; Settings
 
+(defvar lispm-form--widgets)
+
 (defmacro lispm-comfyui-test--with-settings (answer &rest body)
   "Run BODY with settings of its own, the server answering ANSWER.
-ANSWER is what /system_stats answers, or a string, the error.  What is
-saved is pushed onto `saved' instead."
+ANSWER is what /system_stats answers, or a string, the error;
+/object_info answers test/object-info.json.  What is saved is pushed
+onto `saved' instead, the addresses asked onto `asked', and how the
+workflows were drawn anew onto `redrawn'."
   (declare (indent 1))
   `(let ((lispm-comfyui-url "http://comfy.test:8188")
          (lispm-comfyui-dark t)
          (lispm-comfyui-font "Sans")
          (lispm-comfyui-settings--server nil)
-         (saved nil))
+         (saved nil)
+         (asked nil)
+         (redrawn nil))
      (cl-letf (((symbol-function 'lispm-comfyui-settings--save)
                 (lambda (variable value) (set variable value) (push (cons variable value) saved)))
                ((symbol-function 'lispm-comfyui-request)
-                (lambda (_path callback &rest _)
-                  (if (stringp ,answer) (funcall callback nil ,answer) (funcall callback ,answer nil))))
-               ((symbol-function 'lispm-comfyui-types-of-server)
-                (lambda (callback &optional _again) (funcall callback (lispm-comfyui-test--types) nil)))
+                (lambda (path callback &rest _)
+                  (push (concat lispm-comfyui-url path) asked)
+                  (cond ((equal path "/object_info")
+                         (funcall callback (lispm-comfyui-test--json "object-info.json") nil))
+                        ((stringp ,answer) (funcall callback nil ,answer))
+                        (t (funcall callback ,answer nil)))))
+               ((symbol-function 'lispm-comfyui-settings--redraw-workflows)
+                (lambda (&optional again) (push (if again 'again 'drawn) redrawn)))
                ((symbol-function 'lispm-comfyui-close-socket) #'ignore))
        (unwind-protect (progn ,@body)
-         (when-let* ((buffer (get-buffer lispm-comfyui-settings-buffer-name)))
+         (when-let* ((buffer (get-buffer (format "*%s*" lispm-comfyui-settings-title))))
            (kill-buffer buffer))))))
 
 (defconst lispm-comfyui-test--stats
@@ -602,46 +612,110 @@ saved is pushed onto `saved' instead."
     (devices . [((name . "cuda:0 Tesla V100-SXM3-32GB : cudaMallocAsync") (vram_total . 34359738368))]))
   "What a server's /system_stats answers.")
 
-(ert-deftest lispm-comfyui-test-settings-window ()
-  "The settings show the server, asked at once, and the look."
+(defun lispm-comfyui-test--form-text (key text)
+  "Make TEXT what the field KEY of the form in this buffer holds, as typed."
+  (let ((widget (alist-get key lispm-form--widgets)))
+    (delete-region (widget-field-start widget) (widget-field-text-end widget))
+    (goto-char (widget-field-start widget))
+    (insert text)))
+
+(defun lispm-comfyui-test--form-press (key &optional nth)
+  "Press the NTH (default first) control of the field KEY, as Return would."
+  (let ((widgets nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when-let* ((widget (widget-at (point))))
+          (when (and (eq (widget-get widget :lispm-form-key) key) (not (memq widget widgets)))
+            (push widget widgets)))
+        (forward-char 1)))
+    (widget-apply-action (nth (or nth 0) (nreverse widgets)))))
+
+(defun lispm-comfyui-test--form-buttons-p ()
+  "Non-nil if LispM's forms have rows of buttons."
+  (and (require 'lispm-form nil t) (memq 'buttons lispm-form-types)))
+
+(ert-deftest lispm-comfyui-test-settings-form ()
+  "The settings are a form: the address, the colours and the font, saved."
+  (skip-unless (require 'lispm-form nil t))
+  (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
+    (let ((buffer (lispm-comfyui-settings)))
+      (with-current-buffer buffer
+        (should (eq major-mode 'lispm-form-mode))
+        (should (equal (lispm-form-value 'address) "http://comfy.test:8188"))
+        (should (eq (lispm-form-value 'colours) 'dark))
+        (should (equal (lispm-form-value 'font) "Sans"))
+        (should (string-match-p "(\\*) Dark, as ComfyUI draws them\n.*( ) Emacs's own" (buffer-string)))
+        ;; An address not a server's is refused.
+        (lispm-comfyui-test--form-text 'address "ftp://comfy.lan")
+        (should (equal (cadr (should-error (lispm-form-submit) :type 'user-error))
+                       "Address: it is http://HOST:PORT, as http://127.0.0.1:8188"))
+        ;; One typed short is made whole.
+        (lispm-comfyui-test--form-text 'address "comfy.lan:8188/")
+        (lispm-comfyui-test--form-press 'colours 1)
+        (should (eq (lispm-form-value 'colours) 'emacs))
+        (lispm-form-submit))
+      (should-not (buffer-live-p buffer))
+      (should (equal lispm-comfyui-url "http://comfy.lan:8188"))
+      (should-not lispm-comfyui-dark)
+      (should (equal (reverse saved) '((lispm-comfyui-url . "http://comfy.lan:8188") (lispm-comfyui-dark))))
+      ;; Another server's node types are read for the workflows.
+      (should (equal redrawn '(again))))))
+
+(ert-deftest lispm-comfyui-test-settings-cancel ()
+  "Cancelled, the settings stay as they were."
+  (skip-unless (require 'lispm-form nil t))
   (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
     (with-current-buffer (lispm-comfyui-settings)
-      (should (eq major-mode 'lispm-comfyui-settings-mode))
-      (should (string-search "http://comfy.test:8188" (buffer-string)))
-      (should (string-search "ComfyUI 0.37.0, Tesla V100-SXM3-32GB, 32 GB, 14 node types" (buffer-string)))
-      (should (string-search "Dark, as ComfyUI's" (buffer-string)))
-      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'address))
-      (lispm-comfyui-settings-next)
-      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'test))
-      (lispm-comfyui-settings-next)
-      (lispm-comfyui-settings-next)
-      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'colours))
-      (lispm-comfyui-settings-act)
-      (should-not lispm-comfyui-dark)
-      (should (equal saved '((lispm-comfyui-dark))))
-      (should (string-search "Emacs's colours" (buffer-string)))
-      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'colours))
-      (lispm-comfyui-settings-previous)
-      (should (eq (get-text-property (point) 'lispm-comfyui-setting) 'open)))))
+      (lispm-comfyui-test--form-text 'font "Geneva")
+      (lispm-comfyui-test--form-press 'colours 1)
+      (lispm-form-cancel))
+    (should-not saved)
+    (should-not redrawn)
+    (should (equal lispm-comfyui-font "Sans"))))
 
-(ert-deftest lispm-comfyui-test-settings-address ()
-  "An address is checked, made whole, saved, and the server asked."
+(ert-deftest lispm-comfyui-test-settings-test-connection ()
+  "The server is asked at once, and again at the address typed, said under it."
+  (skip-unless (lispm-comfyui-test--form-buttons-p))
   (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
-    (lispm-comfyui-settings)
-    (lispm-comfyui-settings-address "comfy.lan:8188/")
-    (should (equal lispm-comfyui-url "http://comfy.lan:8188"))
-    (should (equal (car saved) '(lispm-comfyui-url . "http://comfy.lan:8188")))
-    (should (eq (plist-get lispm-comfyui-settings--server :state) 'answered))
-    (should-error (lispm-comfyui-settings-address "http://comfy.lan:8188/a/path") :type 'user-error)
-    (should-error (lispm-comfyui-settings-address "ftp://comfy.lan") :type 'user-error)
-    (should (equal lispm-comfyui-url "http://comfy.lan:8188"))))
+    (let ((opened nil)
+          (types (length (lispm-comfyui-test--json "object-info.json"))))
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
+        (with-current-buffer (lispm-comfyui-settings)
+          (should (member "http://comfy.test:8188/system_stats" asked))
+          (should (string-search (format "● ComfyUI 0.37.0 · Tesla V100-SXM3-32GB, 32 GB · %d node types" types)
+                                 (buffer-string)))
+          (should (string-match-p "\\[Test Connection\\] \\[Open ComfyUI.s Page\\]" (buffer-string)))
+          (lispm-comfyui-test--form-text 'address "comfy.lan:8188")
+          (lispm-comfyui-test--form-press 'actions 0)
+          (should (equal (car asked) "http://comfy.lan:8188/object_info"))
+          (should (equal (plist-get lispm-comfyui-settings--server :url) "http://comfy.lan:8188"))
+          (should (string-search "● ComfyUI 0.37.0" (buffer-string)))
+          (lispm-comfyui-test--form-press 'actions 1)
+          (should (equal opened '("http://comfy.lan:8188")))
+          ;; Asking is not saving.
+          (should-not saved)
+          (should (equal lispm-comfyui-url "http://comfy.test:8188")))))))
 
 (ert-deftest lispm-comfyui-test-settings-no-answer ()
-  "A server not answering is said to."
-  (lispm-comfyui-test--with-settings "Connection refused"
+  "A server not answering is said to, under its address."
+  (skip-unless (lispm-comfyui-test--form-buttons-p))
+  (lispm-comfyui-test--with-settings "nothing answers at comfy.test:8188"
     (with-current-buffer (lispm-comfyui-settings)
       (should (eq (plist-get lispm-comfyui-settings--server :state) 'failed))
-      (should (string-search "No answer: Connection refused" (buffer-string))))))
+      (should (string-search "○ No answer: nothing answers at comfy.test:8188." (buffer-string))))))
+
+(ert-deftest lispm-comfyui-test-settings-older-forms ()
+  "A LispM whose forms have no buttons shows the settings without."
+  (skip-unless (require 'lispm-form nil t))
+  (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
+    (let ((lispm-form-types '(text text-area picture choice radio check heading)))
+      (with-current-buffer (lispm-comfyui-settings)
+        (should-not asked)
+        (should-not (string-search "Test Connection" (buffer-string)))
+        (should (string-search "As http://HOST:PORT" (buffer-string)))
+        (lispm-form-submit))
+      (should-not saved))))
 
 (ert-deftest lispm-comfyui-test-canvas-message ()
   "What the canvas has to say is said over it, as the server not answering."

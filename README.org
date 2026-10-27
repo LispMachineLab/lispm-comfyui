@@ -66,13 +66,21 @@ made at random each run, as ComfyUI's dynamic prompts are; ~//~ and ~/* */~ are 
 
 * Settings
 
-=,= shows LispM-ComfyUI's settings in a window of their own: the ComfyUI server's address, the
-server asked at once whether it answers, with its version, its GPU and how many node types it
-has; its own page, ComfyUI's frontend, to open; whether workflows are drawn dark, as ComfyUI's,
-or in Emacs's colours; and the fonts they are drawn with.  =n= and =p= go from setting to
-setting, =RET= changes the one at point, =q= goes back.  What is changed is saved with
-Customize and the workflows open are drawn anew.  When the server does not answer, the
-workflow's window says so, and that =,= opens the settings.
+=,= or the Settings button shows LispM-ComfyUI's settings, a form drawn as LispM draws its
+dialogs, in the workflow's window:
+
+- *Server*: the ComfyUI server's address in a text field, and under it whether the server answers,
+  with its version, its GPU and how many node types it has, asked as the settings open.  Test
+  Connection asks the server at the address typed; Open ComfyUI's Page opens its own page,
+  ComfyUI's frontend.
+- *Look*: the colours workflows are drawn in, dark as ComfyUI draws them or Emacs's own, radio
+  buttons; and their fonts, a text field.
+
+Save keeps them, with Customize, and draws the workflows open anew; Cancel leaves them as they
+were.  The mouse works them as any dialog, and so does the keyboard: =TAB= goes from field to
+field and button to button, =C-c C-c= saves, =C-c C-k= cancels.  When the server does not answer,
+the workflow's window says so, and that =,= opens the settings.  In an Emacs without LispM's
+forms, the settings are Customize's.
 
 On macOS, an application reaches the other machines of the local network only once allowed there,
 in System Settings › Privacy & Security › Local Network.  When macOS keeps LispM off it, a
