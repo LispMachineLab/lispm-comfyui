@@ -705,6 +705,27 @@ workflows were drawn anew onto `redrawn'."
       (should (eq (plist-get lispm-comfyui-settings--server :state) 'failed))
       (should (string-search "○ No answer: nothing answers at comfy.test:8188." (buffer-string))))))
 
+(ert-deftest lispm-comfyui-test-settings-after-update ()
+  "The settings' window of an older LispM-ComfyUI, left open, is a form anew.
+Its buffer has the form's name; once LispM-ComfyUI is updated, its
+commands are gone."
+  (skip-unless (require 'lispm-form nil t))
+  (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
+    (let ((older (get-buffer-create (format "*%s*" lispm-comfyui-settings-title))))
+      (with-current-buffer older
+        (insert "Address  http://comfy.test:8188  a changes it\n"))
+      (let ((buffer (lispm-comfyui-settings)))
+        (should-not (buffer-live-p older))
+        (with-current-buffer buffer
+          (should (derived-mode-p 'lispm-form-mode))
+          (should (equal (lispm-form-value 'address) "http://comfy.test:8188")))
+        ;; A form already there is shown again, as it was left.
+        (with-current-buffer buffer
+          (lispm-comfyui-test--form-text 'font "Geneva"))
+        (should (eq (lispm-comfyui-settings) buffer))
+        (with-current-buffer buffer
+          (should (equal (lispm-form-value 'font) "Geneva")))))))
+
 (ert-deftest lispm-comfyui-test-settings-older-forms ()
   "A LispM whose forms have no buttons shows the settings without."
   (skip-unless (require 'lispm-form nil t))
