@@ -30,13 +30,14 @@
 ;; and video and sound, by workflows: graphs of nodes, a model loaded,
 ;; a prompt encoded, a sampler run, an image decoded and saved, each
 ;; node's outputs linked to the next ones' inputs.  M-x lispm-comfyui
-;; draws a workflow as ComfyUI's own frontend does, from the server at
-;; `lispm-comfyui-url', and edits and runs it from the keyboard: the
-;; workflows of the server's library are opened and saved, nodes added,
-;; linked, their values set, and the graph run, each node lit while it
-;; runs and the images it makes shown in it.
+;; shows a workflow from `lispm-comfyui-url' in a fixed graphical form:
+;; common parameters, each node's controls in data-flow order, and the
+;; images the last run made.  The form scrolls vertically and edits the
+;; same graph as the canvas and the agents' tools, with shared undo.
+;; `lispm-comfyui-default-view' chooses the initial view; v or C-c C-v
+;; switches to the node canvas, where nodes can be added and arranged.
 ;;
-;; The arrow keys go from node to node, the way they point; n and p
+;; On the canvas, the arrow keys go from node to node; n and p
 ;; from item to item of a node, its inputs, outputs and widgets; RET
 ;; does what the item chosen calls for: a value is set, an input linked
 ;; from an output, an output to an input.  Each key is also a menu
@@ -59,6 +60,7 @@
 (require 'lispm-comfyui-client)
 (require 'lispm-comfyui-canvas)
 (require 'lispm-comfyui-settings)
+(require 'lispm-comfyui-simple)
 
 ;; An Emacs built without images, as one running tests, has none.
 (declare-function image-flush "image.c" (spec &optional frame))
@@ -78,6 +80,19 @@
   "The width of the workflows on the left, in columns."
   :type 'natnum
   :group 'lispm-comfyui)
+
+(defcustom lispm-comfyui-default-view 'simple
+  "The view shown when a workflow is opened.
+`simple' shows a fixed form with ordinary vertical scrolling;
+`graph' shows the node canvas, with zooming, panning and dragging."
+  :type '(choice (const :tag "Simple View" simple)
+                 (const :tag "Graph View" graph))
+  :group 'lispm-comfyui)
+
+(defvar-local lispm-comfyui--current-view nil
+  "The workflow's current view, `simple' or `graph'.
+The workflow buffer owns the graph in either view; a simple view
+uses its companion form buffer in the same window.")
 
 (defvar-local lispm-comfyui--root nil
   "The workflow this buffer shows.")
@@ -351,16 +366,37 @@ input image it loads."
                                        (lambda (node) (lispm-comfyui--node-image node types))
                                        (lispm-comfyui--io-nodes)))))
 
+(defun lispm-comfyui--workflow-buffer (&optional buffer)
+  "The workflow owned or displayed by BUFFER, by default this buffer.
+Return nil for buffers that are neither a workflow nor its simple form."
+  (with-current-buffer (or buffer (current-buffer))
+    (cond ((derived-mode-p 'lispm-comfyui-mode) (current-buffer))
+          ((and (derived-mode-p 'lispm-comfyui-simple-mode)
+                (buffer-live-p lispm-comfyui-simple--workflow))
+           lispm-comfyui-simple--workflow))))
+
 (defun lispm-comfyui--window ()
-  "The window showing this buffer, the selected one if it does."
-  (if (eq (window-buffer) (current-buffer)) (selected-window)
-    (get-buffer-window (current-buffer) t)))
+  "The window showing this workflow or its form, preferring the selected one."
+  (let ((buffer (current-buffer)))
+    (if (eq (lispm-comfyui--workflow-buffer (window-buffer)) buffer)
+        (selected-window)
+      (or (and (eq lispm-comfyui--current-view 'simple)
+               (buffer-live-p lispm-comfyui--simple-buffer)
+               (get-buffer-window lispm-comfyui--simple-buffer t))
+          (get-buffer-window buffer t)))))
 
 (defun lispm-comfyui--draw ()
-  "Draw the graph in this buffer, as large as its window."
+  "Refresh this workflow's current view, preserving the simple form's point."
   (when lispm-comfyui--timer
     (cancel-timer lispm-comfyui--timer)
     (setq lispm-comfyui--timer nil))
+  (if (eq lispm-comfyui--current-view 'simple)
+      (lispm-comfyui-simple-refresh)
+    (lispm-comfyui--draw-graph))
+  (force-mode-line-update))
+
+(defun lispm-comfyui--draw-graph ()
+  "Draw the graph in this buffer, as large as its window."
   (lispm-comfyui--relayout)
   (when-let* ((window (lispm-comfyui--window))
               ((display-images-p (window-frame window))))
@@ -414,9 +450,10 @@ input image it loads."
 
 (defun lispm-comfyui--window-changed (window)
   "Draw the graph anew for WINDOW, whose size or buffer changed."
-  (with-current-buffer (window-buffer window)
-    (when (derived-mode-p 'lispm-comfyui-mode)
-      (with-selected-window window (lispm-comfyui--workflows-ensure))
+  (when-let* ((buffer (lispm-comfyui--workflow-buffer (window-buffer window))))
+    (with-current-buffer buffer
+      (with-selected-window window
+        (with-current-buffer buffer (lispm-comfyui--workflows-ensure)))
       (lispm-comfyui--draw-soon))))
 
 (defun lispm-comfyui--header ()
@@ -438,6 +475,28 @@ input image it loads."
          (t ""))))
 
 ;;;; The view
+
+(defun lispm-comfyui--view-buffer ()
+  "The buffer displaying this workflow in its current view, making it if needed."
+  (if (eq lispm-comfyui--current-view 'simple)
+      (lispm-comfyui-simple-buffer)
+    (current-buffer)))
+
+(defun lispm-comfyui-toggle-view ()
+  "Switch this workflow between its fixed Simple View and the Graph View."
+  (interactive)
+  (let ((buffer (or (lispm-comfyui--workflow-buffer)
+                    (user-error "No ComfyUI workflow here"))))
+    (with-current-buffer buffer
+      (setq lispm-comfyui--current-view
+            (if (eq lispm-comfyui--current-view 'simple) 'graph 'simple)))
+    (pop-to-buffer-same-window
+     (with-current-buffer buffer (lispm-comfyui--view-buffer)))
+    (with-current-buffer buffer
+      (lispm-comfyui--workflows-ensure)
+      (when (eq lispm-comfyui--current-view 'graph)
+        (unless lispm-comfyui--layout (lispm-comfyui--fit)))
+      (lispm-comfyui--draw))))
 
 (defun lispm-comfyui--view-size ()
   "The size of the window on the canvas, (WIDTH . HEIGHT), in its units."
@@ -525,8 +584,9 @@ AROUND is the middle of the window by default."
   "Choose the node numbered ID, and its item FOCUS, its title by default."
   (setq lispm-comfyui--selected id
         lispm-comfyui--focus (or focus 0))
-  (lispm-comfyui--relayout)
-  (lispm-comfyui--show-selected)
+  (unless (eq lispm-comfyui--current-view 'simple)
+    (lispm-comfyui--relayout)
+    (lispm-comfyui--show-selected))
   (lispm-comfyui--draw))
 
 (defun lispm-comfyui--centre (place)
@@ -597,7 +657,6 @@ made to have their subgraphs' inputs after."
              (setq lispm-comfyui--redo nil
                    lispm-comfyui--modified t)
              (cl-incf lispm-comfyui--tick)
-             (lispm-comfyui--relayout)
              (lispm-comfyui--draw))
          (error (lispm-comfyui--set-root ,before ,path)
                 (signal (car err) (cdr err)))))))
@@ -776,6 +835,17 @@ On an input or output of the subgraph shown, that input or output goes."
   "Set NODE's widget NAME to VALUE, as one change."
   (lispm-comfyui--change
     (lispm-comfyui-set-widget node (lispm-comfyui--types) name value)))
+
+(defun lispm-comfyui--set-link (node input source output)
+  "Feed NODE's named INPUT from SOURCE's OUTPUT, as one change.
+With SOURCE nil, disconnect INPUT.  Use the same graph operations
+and undo transaction as the canvas's connect and disconnect commands."
+  (lispm-comfyui--change
+    (if source
+        (lispm-comfyui-graph-connect lispm-comfyui--graph (lispm-comfyui--types)
+                                    source output node input)
+      (when-let* ((index (lispm-comfyui-input-index node input)))
+        (lispm-comfyui-graph-disconnect lispm-comfyui--graph node index)))))
 
 (defvar-local lispm-comfyui--text-target nil
   "Where the text of this buffer goes: (BUFFER NODE-ID WIDGET).")
@@ -1335,10 +1405,9 @@ Its line count, or precise touchpad delta, sets how far to zoom."
 ;;;; Running
 
 (defun lispm-comfyui--canvas-buffers ()
-  "The buffers showing workflows."
-  (seq-filter (lambda (buffer)
-                (eq (buffer-local-value 'major-mode buffer) 'lispm-comfyui-mode))
-              (buffer-list)))
+  "The workflow buffers, in the order their graph or form was last shown.
+Return owners only, once each, so runs and agent tools share their state."
+  (delete-dups (delq nil (mapcar #'lispm-comfyui--workflow-buffer (buffer-list)))))
 
 (defun lispm-comfyui--run-of (prompt-id)
   "The buffer and run of PROMPT-ID, (BUFFER . RUN), or nil."
@@ -1410,7 +1479,10 @@ Its line count, or precise touchpad delta, sets how far to zoom."
      (setq lispm-comfyui--queue-remaining
            (or (alist-get 'queue_remaining (alist-get 'exec_info (alist-get 'status data))) 0))
      (dolist (buffer (lispm-comfyui--canvas-buffers))
-       (with-current-buffer buffer (force-mode-line-update))))
+       (with-current-buffer buffer
+         (force-mode-line-update)
+         (when (eq lispm-comfyui--current-view 'simple)
+           (lispm-comfyui--draw-soon)))))
     ("closed" (lispm-comfyui--recover))
     ("preview"
      (when-let* ((found (or (and (alist-get 'node data) (lispm-comfyui--active-run))
@@ -1623,9 +1695,10 @@ as `lispm-comfyui--runs' holds."
   "Draw the library's names, marking the workflow in the main window."
   (let ((inhibit-read-only t)
         (chosen (get-text-property (point) 'lispm-comfyui-workflow))
-        (name (when (window-live-p lispm-comfyui--workflows-main)
-                (buffer-local-value 'lispm-comfyui--name
-                                    (window-buffer lispm-comfyui--workflows-main)))))
+        (name (when-let* (((window-live-p lispm-comfyui--workflows-main))
+                          (owner (lispm-comfyui--workflow-buffer
+                                  (window-buffer lispm-comfyui--workflows-main))))
+                (buffer-local-value 'lispm-comfyui--name owner))))
     (erase-buffer)
     (insert "\n  " (propertize "Workflows" 'face 'bold) "\n\n")
     (when lispm-comfyui--workflows-status
@@ -1816,11 +1889,15 @@ Return its window, or nil if the workflow's window is too narrow."
   (if name (format "*ComfyUI: %s*" (file-name-sans-extension name)) "*ComfyUI*"))
 
 (defun lispm-comfyui--show (graph name)
-  "Show GRAPH, the workflow NAME, in a buffer; return the buffer."
-  (let ((buffer (if (and (derived-mode-p 'lispm-comfyui-mode)
-                         (not lispm-comfyui--modified) (null lispm-comfyui--name)
-                         (null (lispm-comfyui-graph-nodes lispm-comfyui--root)))
-                    (current-buffer)
+  "Open GRAPH, the workflow NAME, in its default view; return its buffer.
+The simple view starts at its first control with the top of the form
+visible, including when an existing workflow buffer is opened again."
+  (let* ((current (lispm-comfyui--workflow-buffer))
+         (buffer (if (and current
+                          (with-current-buffer current
+                            (and (not lispm-comfyui--modified) (null lispm-comfyui--name)
+                                 (null (lispm-comfyui-graph-nodes lispm-comfyui--root)))))
+                    current
                   (or (and name (get-buffer (lispm-comfyui--buffer-name name)))
                       (generate-new-buffer (lispm-comfyui--buffer-name name))))))
     (with-current-buffer buffer
@@ -1831,16 +1908,33 @@ Return its window, or nil if the workflow's window is too narrow."
         (user-error "Kept as it was"))
       (lispm-comfyui--set-root graph)
       (setq lispm-comfyui--name name
+            lispm-comfyui--current-view lispm-comfyui-default-view
             lispm-comfyui--modified nil
             lispm-comfyui--undo nil lispm-comfyui--redo nil
-            lispm-comfyui--images nil lispm-comfyui--errors nil
+            lispm-comfyui--images nil lispm-comfyui--errors nil lispm-comfyui--runs nil
+            lispm-comfyui--status nil lispm-comfyui--progress nil
+            lispm-comfyui--executing nil lispm-comfyui--preview nil
             lispm-comfyui--selected nil lispm-comfyui--focus 0)
+      (when (buffer-live-p lispm-comfyui--simple-buffer)
+        (with-current-buffer lispm-comfyui--simple-buffer
+          (setq lispm-comfyui-simple--problems nil)))
       (rename-buffer (lispm-comfyui--buffer-name name) t))
-    (pop-to-buffer-same-window buffer)
+    (pop-to-buffer-same-window
+     (with-current-buffer buffer (lispm-comfyui--view-buffer)))
     (with-current-buffer buffer
       (lispm-comfyui--workflows-ensure t)
-      (lispm-comfyui--fit)
-      (lispm-comfyui--draw))
+      (when (eq lispm-comfyui--current-view 'graph) (lispm-comfyui--fit))
+      (lispm-comfyui--draw)
+      (when (eq lispm-comfyui--current-view 'simple)
+        (when-let* ((window (lispm-comfyui--window)))
+          (with-current-buffer lispm-comfyui--simple-buffer
+            ;; Opening begins at the toolbar even if this form was scrolled
+            ;; before.  View switching and ordinary refresh keep their place.
+            (goto-char (point-min))
+            (lispm-ui-form--first-field)
+            (set-window-point window (point))
+            (set-window-start window (point-min) t)
+            (set-window-vscroll window 0 t)))))
     buffer))
 
 (defun lispm-comfyui-open (name)
@@ -1872,7 +1966,8 @@ Return its window, or nil if the workflow's window is too narrow."
                            (lispm-comfyui-graph-from-json json (lispm-comfyui-cached-types)))
                   (lispm-comfyui-graph-from-prompt json (lispm-comfyui--need-types)))))
     (with-current-buffer (lispm-comfyui--show graph nil)
-      (setq lispm-comfyui--modified t))))
+      (setq lispm-comfyui--modified t)
+      (lispm-comfyui--draw))))
 
 (defun lispm-comfyui-new ()
   "Start a new, empty workflow."
@@ -1901,6 +1996,7 @@ Without a name, it is asked for the first time."
                    lispm-comfyui--modified (/= tick lispm-comfyui--tick))
              (rename-buffer (lispm-comfyui--buffer-name name) t)
              (force-mode-line-update)
+             (lispm-comfyui--draw-soon)
              (lispm-comfyui--refresh-workflows)
              (message "Saved %s" name))))))))
 
@@ -2094,6 +2190,11 @@ A node of it takes their place, linked as they were."
   (lispm-comfyui-unpack-subgraph :key "X" :help "Put the nodes inside the subgraph in its place"
                                  :label "Unpack Subgraph" :enabled (lispm-comfyui--subgraph-node-p))
   :menu "View"
+  (lispm-comfyui-toggle-view :key ("v" "C-c C-v")
+                             :help "Switch between the fixed form and the node canvas"
+                             :label (if (eq lispm-comfyui--current-view 'simple)
+                                        "Graph View" "Simple View"))
+  "---"
   (lispm-comfyui-show-workflows :key "w" :help "Go to the workflows on the left"
                                 :label "Show Workflows")
   (lispm-comfyui-go-to-node :key ("j" "/") :help "Go to a node by its title" :label "Go to Node…")
@@ -2107,9 +2208,15 @@ A node of it takes their place, linked as they were."
                                :label "Show Chosen Node"))
 
 (define-derived-mode lispm-comfyui-mode special-mode "ComfyUI"
-  "A ComfyUI workflow, drawn as ComfyUI's frontend draws it.
-The arrow keys go from node to node; n and p from item to item of the
-node chosen, its inputs, outputs and widgets; RET does what the item
+  "A ComfyUI workflow, shown in Simple View by default.
+Simple View is a fixed graphical form: common parameters first, then
+each node's controls in data-flow order, and the last run's images.
+TAB visits fields; the wheel scrolls vertically.  Changes use the same
+graph and undo history in both views.  `lispm-comfyui-default-view'
+chooses the initial view; v or C-c C-v switches views.  In text fields,
+v types a letter, and C-c C-v switches views.
+In Graph View, the arrows go from node to node; n and p from item to item
+of the node chosen, its inputs, outputs and widgets; RET does what the item
 calls for.  The wheel zooms about the pointer; Shift-wheel and sideways
 wheel turns pan the canvas, as dragging it does.
 w goes to the workflows on the left, and back.
@@ -2120,7 +2227,8 @@ w goes to the workflows on the left, and back.
   (setq buffer-read-only t
         truncate-lines t
         cursor-type nil)
-  (setq-local cursor-in-non-selected-windows nil
+  (setq-local lispm-comfyui--current-view lispm-comfyui-default-view
+              cursor-in-non-selected-windows nil
               line-spacing nil
               auto-hscroll-mode nil
               scroll-margin 0
@@ -2143,6 +2251,7 @@ w goes to the workflows on the left, and back.
   (add-hook 'window-size-change-functions #'lispm-comfyui--window-changed nil t)
   (add-hook 'window-buffer-change-functions #'lispm-comfyui--window-changed nil t)
   (add-hook 'kill-buffer-query-functions #'lispm-comfyui--may-kill nil t)
+  (add-hook 'kill-buffer-hook #'lispm-comfyui--close-view nil t)
   (unless (lispm-comfyui-cached-types) (lispm-comfyui--load-types)))
 
 (defun lispm-comfyui--may-kill ()
@@ -2152,6 +2261,15 @@ w goes to the workflows on the left, and back.
       (yes-or-no-p (format "The workflow %s changed since it was saved; close it anyway? "
                            (or lispm-comfyui--name "Untitled")))))
 
+(defun lispm-comfyui--close-view ()
+  "Cancel this workflow's redraw timer and close its companion form."
+  (when lispm-comfyui--timer (cancel-timer lispm-comfyui--timer))
+  (when (buffer-live-p lispm-comfyui--simple-buffer)
+    (with-current-buffer lispm-comfyui--simple-buffer
+      (setq lispm-comfyui-simple--workflow nil)
+      (set-buffer-modified-p nil)
+      (kill-buffer (current-buffer)))))
+
 ;;;###autoload
 (defun lispm-comfyui ()
   "Show ComfyUI's workflows: the one last shown, or a new one."
@@ -2160,9 +2278,14 @@ w goes to the workflows on the left, and back.
              (window-live-p lispm-comfyui--workflows-main))
     (select-window lispm-comfyui--workflows-main))
   (if-let* ((buffer (car (lispm-comfyui--canvas-buffers))))
-      (progn (pop-to-buffer-same-window buffer)
-             (lispm-comfyui--workflows-ensure t)
-             (lispm-comfyui--draw))
+      (progn
+        (pop-to-buffer-same-window
+         (with-current-buffer buffer
+           (setq lispm-comfyui--current-view lispm-comfyui-default-view)
+           (lispm-comfyui--view-buffer)))
+        (with-current-buffer buffer
+          (lispm-comfyui--workflows-ensure t)
+          (lispm-comfyui--draw)))
     (lispm-comfyui-new)))
 
 (provide 'lispm-comfyui)

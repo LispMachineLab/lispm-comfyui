@@ -187,7 +187,7 @@ same, or, separated by commas, share one, case aside."
                   outputs))))
 
 (defun lispm-comfyui-widget-choices (spec)
-  "The choices a combo widget of SPEC offers, a list of strings."
+  "The choices a combo widget of SPEC offers, retaining their JSON types."
   (let ((type (lispm-comfyui-spec-type spec)))
     (cond ((vectorp type) (append type nil))
           ((equal type "COMFY_DYNAMICCOMBO_V3")
@@ -1085,7 +1085,8 @@ into that input before is replaced.  Returns the new link; signals
 
 (defun lispm-comfyui-check-value (spec value)
   "VALUE made fit for a widget of SPEC; signals `lispm-comfyui-error' if not.
-Numbers are kept within the widget's bounds, integers made whole."
+Numbers are kept within the widget's bounds, integers made whole.
+A declared choice keeps its type, including numeric COMBO values."
   (let ((kind (lispm-comfyui-widget-kind spec))
         (min (lispm-comfyui-spec-option spec 'min))
         (max (lispm-comfyui-spec-option spec 'max)))
@@ -1102,13 +1103,16 @@ Numbers are kept within the widget's bounds, integers made whole."
          (if (eq kind 'int) (truncate number) (float number))))
       ('boolean (if (or (memq value '(nil :false :null 0)) (equal value "false")) :false t))
       ('string (if (stringp value) value (format "%s" value)))
-      (_ (let ((choices (lispm-comfyui-widget-choices spec))
-               (value (if (stringp value) value (format "%s" value))))
+      (_ (let* ((choices (lispm-comfyui-widget-choices spec))
+                (value (if (or (stringp value) (member value choices))
+                           value
+                         (format "%s" value))))
            (if (or (null choices) (member value choices))
                value
              (signal 'lispm-comfyui-error
                      (list (format "%S is not among the choices: %s" value
-                                   (string-join (seq-take choices 20) ", "))))))))))
+                                   (mapconcat (lambda (choice) (format "%s" choice))
+                                              (seq-take choices 20) ", "))))))))))
 
 (cl-defun lispm-comfyui-set-widget (node types name value)
   "Set NODE's widget NAME, of TYPES, to VALUE; return the value set.

@@ -2,34 +2,68 @@
 
 #+HTML: <p align="center"><a href="https://github.com/LispMachineLab/lispm-comfyui/actions/workflows/test.yml"><img src="https://github.com/LispMachineLab/lispm-comfyui/actions/workflows/test.yml/badge.svg" alt="test" /></a></p>
 
-[[https://github.com/comfyanonymous/ComfyUI][ComfyUI]]'s workflows in Emacs: drawn as ComfyUI's own frontend draws them, nodes under their
-titles, inputs on the left, outputs on the right, widgets below, links curving between them in the
-colours of what they carry; edited and run from the keyboard, each node lit while it runs and the
-images it makes shown in it.  The workflows are those of a ComfyUI server's library, which its own
+[[https://github.com/comfyanonymous/ComfyUI][ComfyUI]]'s workflows in Emacs: graphical forms for editing and running workflows, with common
+parameters first, each node's controls below, and the last run's images at the bottom.  The default
+Simple View has a fixed layout and normal vertical scrolling.  Graph View draws the nodes and
+links as ComfyUI's own frontend does, with zoom and drag.  Both views edit the same workflow,
+with the same undo history.  The workflows are those of a ComfyUI server's library, which its own
 frontend opens and saves too.  It is an application of [[https://github.com/LispMachineLab/lispm-desktop][LispM Desktop]], which its App Store installs,
 and works in any Emacs 30.1 or later that draws SVG.  In code, the prefix is ~lispm-comfyui-~.
 
 * What it needs
 
 - *A ComfyUI server*, which LispM-ComfyUI is not: ComfyUI itself, run on this machine or another,
-  at =http://127.0.0.1:8188= by default, its own address.  The settings, =,=, change it.  A server
+  at =http://127.0.0.1:8188= by default, its own address.  Settings changes it.  A server
   on another machine of the network is reached where it listens, as through a reverse proxy that
   passes WebSockets on; ~lispm-comfyui-headers~ adds what such a proxy asks for, as a password.
 - *websocket*, Emacs's WebSocket client, from GNU ELPA, over which the server tells what it runs.
   The App Store installs it, as package.el does.
 - *lispm-kit*, [[https://github.com/LispMachineLab/lispm-kit][LispM Kit]], with which the window declares each command once: its keys, its menu
   item and, for the main ones, the words of a button.  The App Store installs it first.
-- *lispm-ui*, [[https://github.com/LispMachineLab/lispm-ui][LispM UI]], which draws the settings' form and the dialog an image to upload is chosen
-  in, in any Emacs, as LispM draws its dialogs.  The App Store installs it first.
+- *lispm-ui*, [[https://github.com/LispMachineLab/lispm-ui][LispM UI]], which draws Simple View, the settings' form and the dialog an image to upload
+  is chosen in, in any Emacs, as LispM draws its dialogs.  The App Store installs it first.
 
 * Using it
 
-=M-x lispm-comfyui= opens the workflow last shown, or a new one; =o= opens one of the server's
-library.  The Workflows pane on the left lists the library as the window opens, and again after
-saving a workflow or changing the server's address in Settings.  =w= moves into the list and back;
+=M-x lispm-comfyui= opens the workflow last shown, or a new one; =M-x lispm-comfyui-open= opens
+one of the server's library.  The Workflows pane on the left lists the library as the window opens, and again after
+saving a workflow or changing the server's address in Settings.  =C-c C-w= moves from Simple View
+into the list; =w= does so from Graph View, and returns from the list;
 =n= and =p=, or the arrows, choose an entry, =RET= or a click opens it, and =g= reads the list again.
-The workflow shown is marked.  A node is chosen, and one of its items: its title, an input, an
-output or a widget.
+The workflow shown is marked.
+
+** Simple View
+
+Workflows open in Simple View by default, in the main window beside the Workflows pane.  Its
+buttons run, stop and save the workflow, switch to Graph View, or open Settings.  The status
+under them reports the queue, run progress and errors.  The form has no zoom or pan: scroll
+vertically to reach its controls, click to edit them, and use =TAB= and =S-TAB= to move between
+fields.  =C-c C-c= runs, =C-c C-k= stops, and =C-x C-s= saves.
+
+The *Common* group gathers the positive and negative prompts connected to a sampler, seed and
+its control after generation, sampling settings, latent width, height and batch size, LoRA
+strengths and the image to load, when the workflow has them.  Prompt fields accept several
+lines.  Each node then has a group of its own, in data-flow order, with its widgets and input
+connections.  Choices and check boxes reflect the node types; numeric fields check numbers and
+the bounds those types declare.  An input's menu lists compatible outputs of other nodes.
+The last run's output images appear below the node groups once they arrive.
+
+Changes take effect in the graph as they are made.  =C-/= undoes a graph change, including a
+changed connection; the other view and agents see the same values.  Changes made in Graph View
+or by an agent refresh the form.  To add or remove nodes, switch to Graph View.
+
+The View menu switches between Simple View and Graph View.  =v= switches from the graph or from
+outside an editable form field; =C-c C-v= works while typing in the form.  The Graph View button
+also switches.  To open workflows in Graph View by default, customize
+~lispm-comfyui-default-view~, or set it before opening a workflow:
+
+#+begin_src emacs-lisp
+(setq lispm-comfyui-default-view 'graph) ; Use 'simple for the default form.
+#+end_src
+
+** Graph View
+
+A node is chosen, and one of its items: its title, an input, an output or a widget.
 
 | =←= =→= =↑= =↓=, =b= =f= =M-p= =M-n= | choose the nearest node the way they point                    |
 | =TAB= =S-TAB=                     | the next and the previous node, column by column               |
@@ -54,6 +88,7 @@ output or a widget.
 | =s= =S=                           | save the workflow in the server's library, under another name |
 | =o= =O= =N=                       | open a workflow of the library, of a file, a new one          |
 | =w=                               | go to the workflows on the left, and back                      |
+| =v=                               | switch between Simple View and Graph View                      |
 | =g=                               | read the server's node types again                             |
 | =,=                               | the settings: the server, the colours, the font                |
 | =C-M-d= =>=, =C-M-u= =<=          | enter the subgraph of the node chosen, leave it                |
@@ -75,7 +110,7 @@ made at random each run, as ComfyUI's dynamic prompts are; ~//~ and ~/* */~ are 
 
 * Settings
 
-=,= or the Settings button shows LispM-ComfyUI's settings, a form drawn as LispM draws its
+The Settings button or menu item (=,= in Graph View) shows LispM-ComfyUI's settings, a form drawn as LispM draws its
 dialogs, in the workflow's window:
 
 - *Server*: the ComfyUI server's address in a text field, and under it whether the server answers,
@@ -88,7 +123,7 @@ dialogs, in the workflow's window:
 Save keeps them, with Customize, and draws the workflows open anew; Cancel leaves them as they
 were.  The mouse works them as any dialog, and so does the keyboard: =TAB= goes from field to
 field and button to button, =C-c C-c= saves, =C-c C-k= cancels.  When the server does not answer,
-the workflow's window says so, and that =,= opens the settings.
+the workflow's window says so; Settings opens the server's address.
 
 On macOS, an application reaches the other machines of the local network only once allowed there,
 in System Settings › Privacy & Security › Local Network.  When macOS keeps LispM off it, a
