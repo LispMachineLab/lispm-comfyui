@@ -25,7 +25,11 @@ and works in any Emacs 30.1 or later that draws SVG.  In code, the prefix is ~li
 * Using it
 
 =M-x lispm-comfyui= opens the workflow last shown, or a new one; =o= opens one of the server's
-library.  A node is chosen, and one of its items: its title, an input, an output or a widget.
+library.  The Workflows pane on the left lists the library as the window opens, and again after
+saving a workflow or changing the server's address in Settings.  =w= moves into the list and back;
+=n= and =p=, or the arrows, choose an entry, =RET= or a click opens it, and =g= reads the list again.
+The workflow shown is marked.  A node is chosen, and one of its items: its title, an input, an
+output or a widget.
 
 | =←= =→= =↑= =↓=, =b= =f= =M-p= =M-n= | choose the nearest node the way they point                    |
 | =TAB= =S-TAB=                     | the next and the previous node, column by column               |
@@ -49,6 +53,7 @@ library.  A node is chosen, and one of its items: its title, an input, an output
 | =i=                               | show the image the node made in a window                       |
 | =s= =S=                           | save the workflow in the server's library, under another name |
 | =o= =O= =N=                       | open a workflow of the library, of a file, a new one          |
+| =w=                               | go to the workflows on the left, and back                      |
 | =g=                               | read the server's node types again                             |
 | =,=                               | the settings: the server, the colours, the font                |
 | =C-M-d= =>=, =C-M-u= =<=          | enter the subgraph of the node chosen, leave it                |
@@ -57,9 +62,9 @@ library.  A node is chosen, and one of its items: its title, an input, an output
 | =X=                               | put the nodes inside the subgraph's node chosen in its place   |
 | =C-u t=                           | on a subgraph's node, name the subgraph                        |
 
-The mouse chooses as the keys do: a node dragged moves, the canvas dragged looks about, the
-wheel scrolls and, with Control, zooms, as a touchpad's pinch does.  A double click does what
-=RET= does.
+The mouse chooses as the keys do: a node dragged moves, the canvas dragged looks about, and the
+wheel zooms about the pointer, as a touchpad's pinch does.  Shift-wheel and sideways wheel turns
+pan the canvas.  Control-wheel still zooms.  A double click does what =RET= does.
 
 A text of many lines is edited in a buffer of its own, =C-c C-c= setting it.  A choice of an
 image to load, as LoadImage's, offers to upload one of this machine's, chosen in LispM UI's file

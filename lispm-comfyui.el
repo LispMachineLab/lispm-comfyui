@@ -40,7 +40,8 @@
 ;; from item to item of a node, its inputs, outputs and widgets; RET
 ;; does what the item chosen calls for: a value is set, an input linked
 ;; from an output, an output to an input.  Each key is also a menu
-;; item: C-h m lists them.
+;; item: C-h m lists them.  The wheel zooms about the pointer; with
+;; Shift, or turned sideways, it pans, as dragging the canvas does.
 ;;
 ;; With LispM Agent, its agents edit and run the workflow shown, with
 ;; the tools of lispm-comfyui-tools.el.
@@ -71,6 +72,11 @@
 (defcustom lispm-comfyui-font "Helvetica Neue, Helvetica, Arial, sans-serif"
   "The fonts workflows are drawn with, as SVG names them, the first found used."
   :type 'string
+  :group 'lispm-comfyui)
+
+(defcustom lispm-comfyui-sidebar-width 28
+  "The width of the workflows on the left, in columns."
+  :type 'natnum
   :group 'lispm-comfyui)
 
 (defvar-local lispm-comfyui--root nil
@@ -410,6 +416,7 @@ input image it loads."
   "Draw the graph anew for WINDOW, whose size or buffer changed."
   (with-current-buffer (window-buffer window)
     (when (derived-mode-p 'lispm-comfyui-mode)
+      (with-selected-window window (lispm-comfyui--workflows-ensure))
       (lispm-comfyui--draw-soon))))
 
 (defun lispm-comfyui--header ()
@@ -1258,29 +1265,63 @@ argument, on a subgraph's node, name the subgraph, all its nodes'."
       (lispm-comfyui--draw)
       (lispm-comfyui-act))))
 
-(defun lispm-comfyui--wheel (dx dy)
-  "Scroll the view by DX DY lines' worth."
-  (pcase-let ((`(,x ,y ,scale) lispm-comfyui--view))
-    (setq lispm-comfyui--view (list (+ x (/ (* dx 40) scale)) (+ y (/ (* dy 40) scale)) scale))
-    (lispm-comfyui--draw-soon)))
+(defun lispm-comfyui--wheel-buffer (event)
+  "The buffer under wheel EVENT, or this buffer for a numeric amount."
+  (let ((window (and (consp event) (posn-window (event-start event)))))
+    (if (window-live-p window) (window-buffer window) (current-buffer))))
 
-(defun lispm-comfyui-wheel-up (&optional amount) "Look up." (interactive)
-       (lispm-comfyui--wheel 0 (- (if (numberp amount) amount 1))))
-(defun lispm-comfyui-wheel-down (&optional amount) "Look down." (interactive)
-       (lispm-comfyui--wheel 0 (if (numberp amount) amount 1)))
-(defun lispm-comfyui-wheel-left (&optional amount) "Look left." (interactive)
-       (lispm-comfyui--wheel (- (if (numberp amount) amount 1)) 0))
-(defun lispm-comfyui-wheel-right (&optional amount) "Look right." (interactive)
-       (lispm-comfyui--wheel (if (numberp amount) amount 1) 0))
+(defun lispm-comfyui--wheel (dx dy &optional event)
+  "Scroll the view under EVENT by DX DY lines' worth.
+Without EVENT, scroll this buffer's view."
+  (with-current-buffer (lispm-comfyui--wheel-buffer event)
+    (pcase-let ((`(,x ,y ,scale) lispm-comfyui--view))
+      (setq lispm-comfyui--view (list (+ x (/ (* dx 40) scale)) (+ y (/ (* dy 40) scale)) scale))
+      (lispm-comfyui--draw-soon))))
+
+(defun lispm-comfyui--wheel-amount (amount &optional horizontal)
+  "The lines turned by AMOUNT, a wheel event or a number of lines.
+For a precise touchpad event, forty pixels count as one line, as
+`lispm-comfyui--wheel' pans them.  HORIZONTAL uses its sideways delta.
+Repeated events' click counts do not accelerate the movement."
+  (let* ((delta (and (consp amount) (nth 4 amount)))
+         (pixels (and (consp delta) (if horizontal (car delta) (cdr delta)))))
+    (cond ((numberp amount) (abs amount))
+          ((numberp pixels) (/ (abs pixels) 40.0))
+          ((consp amount) (event-line-count amount))
+          (t 1))))
+
+(defun lispm-comfyui-wheel-up (&optional amount)
+  "Look up by AMOUNT, a Shift-wheel event or a number of lines."
+  (interactive "e")
+  (lispm-comfyui--wheel 0 (- (lispm-comfyui--wheel-amount amount)) amount))
+
+(defun lispm-comfyui-wheel-down (&optional amount)
+  "Look down by AMOUNT, a Shift-wheel event or a number of lines."
+  (interactive "e")
+  (lispm-comfyui--wheel 0 (lispm-comfyui--wheel-amount amount) amount))
+
+(defun lispm-comfyui-wheel-left (&optional amount)
+  "Look left by AMOUNT, a sideways wheel event or a number of lines."
+  (interactive "e")
+  (lispm-comfyui--wheel (- (lispm-comfyui--wheel-amount amount t)) 0 amount))
+
+(defun lispm-comfyui-wheel-right (&optional amount)
+  "Look right by AMOUNT, a sideways wheel event or a number of lines."
+  (interactive "e")
+  (lispm-comfyui--wheel (lispm-comfyui--wheel-amount amount t) 0 amount))
 
 (defun lispm-comfyui-wheel-zoom (event)
-  "Zoom about where EVENT, a wheel's turn with Control, is."
+  "Zoom about where EVENT, a vertical wheel's turn, is.
+Its line count, or precise touchpad delta, sets how far to zoom."
   (interactive "e")
-  (let ((point (lispm-comfyui--event-point event)))
-    (lispm-comfyui--set-scale (* (nth 2 lispm-comfyui--view)
-                                 (if (memq (event-basic-type event) '(wheel-up mouse-4)) 1.1 (/ 1 1.1)))
-                              point)
-    (lispm-comfyui--draw-soon)))
+  (with-current-buffer (lispm-comfyui--wheel-buffer event)
+    (let ((point (lispm-comfyui--event-point event))
+          (amount (lispm-comfyui--wheel-amount event)))
+      (lispm-comfyui--set-scale (* (nth 2 lispm-comfyui--view)
+                                   (expt 1.1 (if (memq (event-basic-type event) '(wheel-up mouse-4))
+                                                 amount (- amount))))
+                                point)
+      (lispm-comfyui--draw-soon))))
 
 (defun lispm-comfyui-pinch (event)
   "Zoom as EVENT, a pinch of a touchpad, says."
@@ -1554,6 +1595,222 @@ as `lispm-comfyui--runs' holds."
 
 ;;;; Workflows
 
+(defvar-local lispm-comfyui--workflows-main nil
+  "The window whose workflows this sidebar lists.")
+
+(defvar-local lispm-comfyui--workflows-names nil
+  "The names last read from the server's library.")
+
+(defvar-local lispm-comfyui--workflows-server nil
+  "The address the workflows were asked of.")
+
+(defvar-local lispm-comfyui--workflows-status nil
+  "What the sidebar says while waiting, or when a request failed.")
+
+(defvar-local lispm-comfyui--workflows-request nil
+  "The current request for names, whose identity discards older answers.")
+
+(defvar-local lispm-comfyui--workflows-timer nil
+  "The timer ending the wait for the list, or nil.")
+
+(defvar-local lispm-comfyui--workflows-opening nil
+  "The current request to open a workflow, or nil.")
+
+(defvar-local lispm-comfyui--workflows-open-timer nil
+  "The timer ending the wait for a workflow, or nil.")
+
+(defun lispm-comfyui--workflows-draw ()
+  "Draw the library's names, marking the workflow in the main window."
+  (let ((inhibit-read-only t)
+        (chosen (get-text-property (point) 'lispm-comfyui-workflow))
+        (name (when (window-live-p lispm-comfyui--workflows-main)
+                (buffer-local-value 'lispm-comfyui--name
+                                    (window-buffer lispm-comfyui--workflows-main)))))
+    (erase-buffer)
+    (insert "\n  " (propertize "Workflows" 'face 'bold) "\n\n")
+    (when lispm-comfyui--workflows-status
+      (insert "  " (replace-regexp-in-string "[\n\r\t]+" " " lispm-comfyui--workflows-status) "\n"))
+    (dolist (entry lispm-comfyui--workflows-names)
+      (insert (propertize (concat (if (equal name entry) "  • " "    ")
+                                 (replace-regexp-in-string "[\n\r\t]+" " " (file-name-sans-extension entry))
+                                 "\n")
+                          'lispm-comfyui-workflow entry
+                          'mouse-face 'highlight 'help-echo entry
+                          'face (and (equal name entry) 'bold))))
+    (unless (or lispm-comfyui--workflows-status lispm-comfyui--workflows-names)
+      (insert "  No workflows in the library.\n"))
+    (goto-char (point-min))
+    (let ((position nil))
+      (while (and (not (eobp)) (not position))
+        (let ((entry (get-text-property (point) 'lispm-comfyui-workflow)))
+          (when (and entry (equal entry (or chosen name))) (setq position (point))))
+        (forward-line 1))
+      (goto-char (or position (text-property-not-all (point-min) (point-max)
+                                                    'lispm-comfyui-workflow nil)
+                     (point-min))))
+    (dolist (window (get-buffer-window-list (current-buffer) nil t))
+      (set-window-point window (point)))
+    (set-buffer-modified-p nil)))
+
+(defun lispm-comfyui--workflows-cancel ()
+  "Discard requests and cancel their timers when this sidebar goes."
+  (dolist (timer (list lispm-comfyui--workflows-timer lispm-comfyui--workflows-open-timer))
+    (when timer (cancel-timer timer)))
+  (setq lispm-comfyui--workflows-request nil lispm-comfyui--workflows-timer nil
+        lispm-comfyui--workflows-opening nil lispm-comfyui--workflows-open-timer nil))
+
+(defun lispm-comfyui-workflows-refresh ()
+  "Read the server's workflow list again, without waiting for it."
+  (interactive)
+  (lispm-comfyui--workflows-cancel)
+  (let ((buffer (current-buffer))
+        (server lispm-comfyui-url)
+        (request (list t)))
+    (setq lispm-comfyui--workflows-request request
+          lispm-comfyui--workflows-server server
+          lispm-comfyui--workflows-names nil
+          lispm-comfyui--workflows-status "Reading workflows…")
+    (lispm-comfyui--workflows-draw)
+    (cl-labels ((answer (names error)
+                 (when (and (buffer-live-p buffer) (equal server lispm-comfyui-url))
+                   (with-current-buffer buffer
+                     (when (eq request lispm-comfyui--workflows-request)
+                       (when lispm-comfyui--workflows-timer
+                         (cancel-timer lispm-comfyui--workflows-timer))
+                       (setq lispm-comfyui--workflows-request nil
+                             lispm-comfyui--workflows-timer nil
+                             lispm-comfyui--workflows-names (unless error names)
+                             lispm-comfyui--workflows-status
+                             (and error (concat "Cannot list workflows: " error)))
+                       (lispm-comfyui--workflows-draw))))))
+      (setq lispm-comfyui--workflows-timer
+            (run-with-timer 30 nil (lambda () (answer nil "The server did not answer."))))
+      (lispm-comfyui-list-workflows #'answer))))
+
+(defun lispm-comfyui--refresh-workflows ()
+  "Read the library again in every workflows sidebar."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'lispm-comfyui-workflows-mode)
+        (lispm-comfyui-workflows-refresh)))))
+
+(defun lispm-comfyui--workflows-ensure (&optional refresh)
+  "Show this workflow's sidebar; with REFRESH, read the library again.
+Return its window, or nil if the workflow's window is too narrow."
+  (when-let* ((main (lispm-comfyui--window)))
+    (let ((side (window-parameter main 'lispm-comfyui-workflows)))
+      (unless (and (window-live-p side)
+                   (eq (buffer-local-value 'major-mode (window-buffer side))
+                       'lispm-comfyui-workflows-mode))
+        (setq side nil)
+        (when (> (window-total-width main) (+ lispm-comfyui-sidebar-width 40))
+          (setq side (split-window main (- lispm-comfyui-sidebar-width) 'left))
+          (let ((buffer (generate-new-buffer "*ComfyUI Workflows*")))
+            (with-current-buffer buffer
+              (lispm-comfyui-workflows-mode)
+              (setq lispm-comfyui--workflows-main main))
+            (set-window-buffer side buffer))
+          (set-window-parameter main 'lispm-comfyui-workflows side)
+          (set-window-dedicated-p side t)
+          (set-window-fringes side 0 0)
+          (set-window-scroll-bars side 0 nil 0 nil)
+          (window-preserve-size side t t)
+          (setq refresh t)))
+      (when side
+        (with-current-buffer (window-buffer side)
+          (if (or refresh (not (equal lispm-comfyui-url lispm-comfyui--workflows-server)))
+              (lispm-comfyui-workflows-refresh)
+            (lispm-comfyui--workflows-draw))))
+      side)))
+
+(defun lispm-comfyui-show-workflows ()
+  "Go to the workflows on the left, or back to the workflow shown."
+  (interactive)
+  (if (derived-mode-p 'lispm-comfyui-workflows-mode)
+      (when (window-live-p lispm-comfyui--workflows-main)
+        (select-window lispm-comfyui--workflows-main))
+    (when-let* ((side (lispm-comfyui--workflows-ensure)))
+      (select-window side))))
+
+(defun lispm-comfyui-workflows-next (&optional backward)
+  "Choose the next workflow, or the previous one with BACKWARD."
+  (interactive)
+  (let ((start (point)))
+    (while (and (zerop (forward-line (if backward -1 1)))
+                (not (get-text-property (point) 'lispm-comfyui-workflow))))
+    (unless (get-text-property (point) 'lispm-comfyui-workflow)
+      (goto-char start))))
+
+(defun lispm-comfyui-workflows-previous ()
+  "Choose the previous workflow."
+  (interactive)
+  (lispm-comfyui-workflows-next t))
+
+(defun lispm-comfyui-workflows-open (&optional event)
+  "Open the workflow at point, or at mouse EVENT, in the main window."
+  (interactive (list (and (mouse-event-p last-input-event) last-input-event)))
+  (when event (mouse-set-point event))
+  (when-let* ((name (get-text-property (point) 'lispm-comfyui-workflow))
+              (main lispm-comfyui--workflows-main)
+              ((window-live-p main)))
+    (let ((sidebar (current-buffer))
+          (buffer (window-buffer main))
+          (server lispm-comfyui-url)
+          (request (list t)))
+      (when lispm-comfyui--workflows-open-timer (cancel-timer lispm-comfyui--workflows-open-timer))
+      (setq lispm-comfyui--workflows-opening request
+            lispm-comfyui--workflows-status (concat "Opening " name "…"))
+      (lispm-comfyui--workflows-draw)
+      (cl-labels ((current ()
+                   (and (buffer-live-p sidebar) (window-live-p main)
+                        (eq buffer (window-buffer main)) (equal server lispm-comfyui-url)
+                        (eq request (buffer-local-value 'lispm-comfyui--workflows-opening sidebar))))
+                 (finish (json types error)
+                   (when (current)
+                     (with-current-buffer sidebar
+                       (when lispm-comfyui--workflows-open-timer
+                         (cancel-timer lispm-comfyui--workflows-open-timer))
+                       (setq lispm-comfyui--workflows-opening nil
+                             lispm-comfyui--workflows-open-timer nil
+                             lispm-comfyui--workflows-status nil)
+                       (condition-case err
+                           (if error
+                               (setq lispm-comfyui--workflows-status (concat "Cannot open workflow: " error))
+                             (with-selected-window main
+                               (lispm-comfyui--show (lispm-comfyui-graph-from-json json types) name)))
+                         (error (setq lispm-comfyui--workflows-status (error-message-string err))))
+                       (lispm-comfyui--workflows-draw)))))
+        (setq lispm-comfyui--workflows-open-timer
+              (run-with-timer 30 nil (lambda () (finish nil nil "The server did not answer."))))
+        (lispm-comfyui-types-of-server
+         (lambda (types error)
+           (when (current)
+             (if error (finish nil nil error)
+               (lispm-comfyui-read-workflow
+                name (lambda (json failure) (finish json types failure)))))))))))
+
+(defvar lispm-comfyui-workflows-mode-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (key '("n" "<down>")) (keymap-set map key #'lispm-comfyui-workflows-next))
+    (dolist (key '("p" "<up>")) (keymap-set map key #'lispm-comfyui-workflows-previous))
+    (keymap-set map "RET" #'lispm-comfyui-workflows-open)
+    (keymap-set map "<mouse-1>" #'lispm-comfyui-workflows-open)
+    (keymap-set map "g" #'lispm-comfyui-workflows-refresh)
+    (keymap-set map "w" #'lispm-comfyui-show-workflows)
+    map)
+  "Keys of the server's workflow list.")
+
+(define-derived-mode lispm-comfyui-workflows-mode special-mode "ComfyUI Workflows"
+  "The server's workflows: RET opens one; w goes back to the canvas.
+\\{lispm-comfyui-workflows-mode-map}"
+  (setq-local truncate-lines t
+              cursor-type nil
+              header-line-format nil)
+  ;; A name too long for the sidebar ends in an ellipsis, not a dollar.
+  (setq buffer-display-table (make-display-table))
+  (set-display-table-slot buffer-display-table 'truncation ?…)
+  (add-hook 'kill-buffer-hook #'lispm-comfyui--workflows-cancel nil t))
+
 (defun lispm-comfyui--buffer-name (name)
   "The name of the buffer of the workflow NAME, nil for a new one."
   (if name (format "*ComfyUI: %s*" (file-name-sans-extension name)) "*ComfyUI*"))
@@ -1581,6 +1838,7 @@ as `lispm-comfyui--runs' holds."
       (rename-buffer (lispm-comfyui--buffer-name name) t))
     (pop-to-buffer-same-window buffer)
     (with-current-buffer buffer
+      (lispm-comfyui--workflows-ensure t)
       (lispm-comfyui--fit)
       (lispm-comfyui--draw))
     buffer))
@@ -1643,6 +1901,7 @@ Without a name, it is asked for the first time."
                    lispm-comfyui--modified (/= tick lispm-comfyui--tick))
              (rename-buffer (lispm-comfyui--buffer-name name) t)
              (force-mode-line-update)
+             (lispm-comfyui--refresh-workflows)
              (message "Saved %s" name))))))))
 
 (defun lispm-comfyui-save-as ()
@@ -1770,11 +2029,12 @@ A node of it takes their place, linked as they were."
   (lispm-comfyui-mouse-down :key "<down-mouse-1>")
   (lispm-comfyui-mouse-double :key "<double-down-mouse-1>")
   (ignore :key ("<mouse-1>" "<double-mouse-1>" "<drag-mouse-1>"))
-  (lispm-comfyui-wheel-up :key "<wheel-up>")
-  (lispm-comfyui-wheel-down :key "<wheel-down>")
-  (lispm-comfyui-wheel-left :key "<wheel-left>")
-  (lispm-comfyui-wheel-right :key "<wheel-right>")
-  (lispm-comfyui-wheel-zoom :key ("C-<wheel-up>" "C-<wheel-down>"))
+  (lispm-comfyui-wheel-up :key ("S-<wheel-up>" "S-<mouse-4>"))
+  (lispm-comfyui-wheel-down :key ("S-<wheel-down>" "S-<mouse-5>"))
+  (lispm-comfyui-wheel-left :key ("<wheel-left>" "<mouse-6>"))
+  (lispm-comfyui-wheel-right :key ("<wheel-right>" "<mouse-7>"))
+  (lispm-comfyui-wheel-zoom :key ("<wheel-up>" "<wheel-down>" "<mouse-4>" "<mouse-5>"
+                                 "C-<wheel-up>" "C-<wheel-down>" "C-<mouse-4>" "C-<mouse-5>"))
   (lispm-comfyui-pinch :key "<pinch>")
   :menu "Workflow"
   (lispm-comfyui-new :key "N" :help "Start a new workflow" :label "New Workflow")
@@ -1834,6 +2094,8 @@ A node of it takes their place, linked as they were."
   (lispm-comfyui-unpack-subgraph :key "X" :help "Put the nodes inside the subgraph in its place"
                                  :label "Unpack Subgraph" :enabled (lispm-comfyui--subgraph-node-p))
   :menu "View"
+  (lispm-comfyui-show-workflows :key "w" :help "Go to the workflows on the left"
+                                :label "Show Workflows")
   (lispm-comfyui-go-to-node :key ("j" "/") :help "Go to a node by its title" :label "Go to Node…")
   (lispm-comfyui-next-node :key "TAB" :help "Choose the next node" :label "Next Node")
   (lispm-comfyui-previous-node :key "<backtab>" :help "Choose the previous node" :label "Previous Node")
@@ -1848,7 +2110,9 @@ A node of it takes their place, linked as they were."
   "A ComfyUI workflow, drawn as ComfyUI's frontend draws it.
 The arrow keys go from node to node; n and p from item to item of the
 node chosen, its inputs, outputs and widgets; RET does what the item
-calls for.
+calls for.  The wheel zooms about the pointer; Shift-wheel and sideways
+wheel turns pan the canvas, as dragging it does.
+w goes to the workflows on the left, and back.
 \\{lispm-comfyui-mode-map}"
   (let ((graph (lispm-comfyui-graph-create)))
     (setq-local lispm-comfyui--root graph
@@ -1872,6 +2136,10 @@ calls for.
               mwheel-scroll-down-function #'lispm-comfyui-wheel-up
               mwheel-scroll-left-function #'lispm-comfyui-wheel-right
               mwheel-scroll-right-function #'lispm-comfyui-wheel-left)
+  ;; The canvas owns wheel events even when precise text scrolling is on.
+  (setq-local minor-mode-overriding-map-alist
+              (cons (cons 'pixel-scroll-precision-mode lispm-comfyui-mode-map)
+                    minor-mode-overriding-map-alist))
   (add-hook 'window-size-change-functions #'lispm-comfyui--window-changed nil t)
   (add-hook 'window-buffer-change-functions #'lispm-comfyui--window-changed nil t)
   (add-hook 'kill-buffer-query-functions #'lispm-comfyui--may-kill nil t)
@@ -1888,8 +2156,12 @@ calls for.
 (defun lispm-comfyui ()
   "Show ComfyUI's workflows: the one last shown, or a new one."
   (interactive)
+  (when (and (derived-mode-p 'lispm-comfyui-workflows-mode)
+             (window-live-p lispm-comfyui--workflows-main))
+    (select-window lispm-comfyui--workflows-main))
   (if-let* ((buffer (car (lispm-comfyui--canvas-buffers))))
       (progn (pop-to-buffer-same-window buffer)
+             (lispm-comfyui--workflows-ensure t)
              (lispm-comfyui--draw))
     (lispm-comfyui-new)))
 
