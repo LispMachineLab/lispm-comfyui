@@ -19,6 +19,8 @@ and works in any Emacs 30.1 or later that draws SVG.  In code, the prefix is ~li
   The App Store installs it, as package.el does.
 - *lispm-kit*, [[https://github.com/LispMachineLab/lispm-kit][LispM Kit]], with which the window declares each command once: its keys, its menu
   item and, for the main ones, the words of a button.  The App Store installs it first.
+- *lispm-ui*, [[https://github.com/LispMachineLab/lispm-ui][LispM UI]], which draws the settings' form and the dialog an image to upload is chosen
+  in, in any Emacs, as LispM draws its dialogs.  The App Store installs it first.
 
 * Using it
 
@@ -60,7 +62,9 @@ wheel scrolls and, with Control, zooms, as a touchpad's pinch does.  A double cl
 =RET= does.
 
 A text of many lines is edited in a buffer of its own, =C-c C-c= setting it.  A choice of an
-image to load, as LoadImage's, offers to upload one of this machine's.  A seed changes after each
+image to load, as LoadImage's, offers to upload one of this machine's, chosen in LispM UI's file
+dialog, which shows the PNG, JPEG and WebP pictures, as ComfyUI's frontend takes them, and the one
+selected.  A seed changes after each
 run as its control says, randomized by default, as in ComfyUI.  A prompt's ={a|b}= is a choice
 made at random each run, as ComfyUI's dynamic prompts are; ~//~ and ~/* */~ are comments.
 
@@ -79,8 +83,7 @@ dialogs, in the workflow's window:
 Save keeps them, with Customize, and draws the workflows open anew; Cancel leaves them as they
 were.  The mouse works them as any dialog, and so does the keyboard: =TAB= goes from field to
 field and button to button, =C-c C-c= saves, =C-c C-k= cancels.  When the server does not answer,
-the workflow's window says so, and that =,= opens the settings.  In an Emacs without LispM UI,
-whose forms they are, the settings are Customize's.
+the workflow's window says so, and that =,= opens the settings.
 
 On macOS, an application reaches the other machines of the local network only once allowed there,
 in System Settings › Privacy & Security › Local Network.  When macOS keeps LispM off it, a
@@ -132,9 +135,9 @@ speaks to a server: [[file:test/object-info.json][test/object-info.json]] holds 
 [[file:test/workflow.json][test/workflow.json]] is ComfyUI's first workflow, with a reroute, a bypassed node and a note;
 subgraphs are made of it in the tests.
 websocket.el is found in package.el's directory, or named by ~WEBSOCKET~; LispM Kit is a checkout
-beside this one, or named by ~LISPM_KIT~.  With LispM Agent's =lisp/= beside this checkout, or
-named by ~LISPM_AGENT~, the tests of the agents' tools run too; with [[https://github.com/LispMachineLab/lispm-ui][LispM UI]] beside it,
-or named by ~LISPM_UI~, those of the settings' form.
+beside this one, or named by ~LISPM_KIT~, and so is LispM UI, or named by ~LISPM_UI~.  With LispM
+Agent's =lisp/= beside this checkout, or named by ~LISPM_AGENT~, the tests of the agents' tools
+run too.
 
 * License
 
