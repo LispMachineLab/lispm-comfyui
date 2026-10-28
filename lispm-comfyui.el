@@ -4,7 +4,7 @@
 
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-comfyui
-;; Version: 0.3.1
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "30.1") (lispm-kit "0.1.0") (lispm-ui "0.2.1") (websocket "1.15"))
 ;; Keywords: multimedia, tools
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
