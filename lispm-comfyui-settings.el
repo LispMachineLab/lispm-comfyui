@@ -24,7 +24,8 @@
 ;;; Commentary:
 
 ;; LispM-ComfyUI's settings, which , opens from a workflow, are a form
-;; of LispM's (lispm-form.el), shown in the workflow's window as a dialog
+;; of LispM UI's (lispm-ui-form.el, `lispm-form' by its first name, which
+;; an older LispM Agent had), shown in the workflow's window as a dialog
 ;; is: the ComfyUI server's address in a text field, a Test Connection
 ;; button asking the server at the address typed whether it answers,
 ;; and what it is, said under the field, an Open ComfyUI's Page button;
@@ -32,7 +33,7 @@
 ;; a text field.  Save keeps them with Customize, for next time, and
 ;; draws the workflows open anew; Cancel leaves them as they were.
 ;;
-;; Where LispM's forms are not, in an Emacs of its own, the settings are
+;; Where LispM UI is not, in an Emacs of its own, the settings are
 ;; Customize's.
 
 ;;; Code:
