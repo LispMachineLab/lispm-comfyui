@@ -212,6 +212,17 @@ them without, and says under the address only how it is written."
       (lispm-comfyui-settings--save 'lispm-comfyui-font font))
     (lispm-comfyui-settings--redraw-workflows again)))
 
+(defun lispm-comfyui-settings--form-buffer ()
+  "The settings' form when there is one already, or nil.
+A buffer of its name that is not a form, the settings' window of
+LispM-ComfyUI before it was updated, whose commands are gone, is
+killed, to be made a form anew."
+  (when-let* ((buffer (get-buffer (format "*%s*" lispm-comfyui-settings-title))))
+    (if (with-current-buffer buffer (derived-mode-p 'lispm-form-mode))
+        buffer
+      (kill-buffer buffer)
+      nil)))
+
 ;;;###autoload
 (defun lispm-comfyui-settings ()
   "Show LispM-ComfyUI's settings in a form, the server asked at once.
@@ -219,7 +230,7 @@ In an Emacs without LispM's forms, show Customize's."
   (interactive)
   (if (not (fboundp 'lispm-form))
       (customize-group 'lispm-comfyui)
-    (let ((buffer (or (get-buffer (format "*%s*" lispm-comfyui-settings-title))
+    (let ((buffer (or (lispm-comfyui-settings--form-buffer)
                       (lispm-form lispm-comfyui-settings-title (lispm-comfyui-settings--fields)
                                   :values `((address . ,lispm-comfyui-url)
                                             (colours . ,(if lispm-comfyui-dark 'dark 'emacs))
