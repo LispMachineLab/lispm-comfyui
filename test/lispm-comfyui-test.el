@@ -656,6 +656,23 @@ then the one the widget loads.  Choosing none uploads nothing."
                      (cons 3 3))))
     (should-not (lispm-comfyui-canvas-hit layout -5000 -5000))))
 
+(ert-deftest lispm-comfyui-test-canvas-grid ()
+  "The canvas's dots are one path, not a pattern, which librsvg is slow to
+fill; zoomed far out, there are none."
+  (let* ((types (lispm-comfyui-test--types))
+         (graph (lispm-comfyui-test--graph))
+         (layout (lispm-comfyui-canvas-layout graph types))
+         (svg (lambda (scale)
+                (lispm-comfyui-canvas-svg (list :graph graph :types types :layout layout
+                                                :view (list 10 20 scale))
+                                          400 200))))
+    (should-not (string-search "<pattern" (funcall svg 1.0)))
+    ;; 40 pixels apart, from 10 and 20 pixels before the window's corner.
+    (should (= (1- (length (split-string (funcall svg 1.0) "h2v2h-2z"))) (* 11 6)))
+    (should (string-search "M-10.0 -20.0h2v2h-2z" (funcall svg 1.0)))
+    (should (string-search "M30.0 20.0h2v2h-2z" (funcall svg 1.0)))
+    (should-not (string-search "h2v2h-2z" (funcall svg 0.1)))))
+
 (ert-deftest lispm-comfyui-test-wrap ()
   "Text is broken into lines that fit, the last cut with an ellipsis."
   (let ((lines (lispm-comfyui-canvas--wrap (make-string 400 ?a) 200 3)))
