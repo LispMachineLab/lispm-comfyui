@@ -5,7 +5,7 @@
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-comfyui
 ;; Version: 0.3.1
-;; Package-Requires: ((emacs "30.1") (lispm-kit "0.1.0") (websocket "1.15"))
+;; Package-Requires: ((emacs "30.1") (lispm-kit "0.1.0") (lispm-ui "0.2.1") (websocket "1.15"))
 ;; Keywords: multimedia, tools
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -52,6 +52,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'lispm-kit-commands)
+(require 'lispm-ui-ask)
 (require 'lispm-comfyui-graph)
 (require 'lispm-comfyui-prompt)
 (require 'lispm-comfyui-client)
@@ -813,11 +814,23 @@ On an input or output of the subgraph shown, that input or output goes."
       (lispm-comfyui-text-mode))
     (pop-to-buffer edit '((display-buffer-below-selected) (window-height . 12)))))
 
+(defconst lispm-comfyui--upload-extensions '("png" "jpg" "jpeg" "webp")
+  "The ends of the names of the pictures an image is uploaded from: PNG,
+JPEG and WebP, as ComfyUI's frontend takes them.")
+
+(defun lispm-comfyui--image-file-p (file)
+  "Non-nil if FILE is a picture an image is uploaded from, by its name."
+  (member (downcase (or (file-name-extension file) "")) lispm-comfyui--upload-extensions))
+
 (defun lispm-comfyui--upload (node name)
-  "Upload a file asked for, and make it the image NODE's widget NAME loads."
-  (let* ((file (read-file-name "Upload an image: " nil nil t))
-         (buffer (current-buffer))
-         (id (lispm-comfyui-node-id node)))
+  "Upload an image chosen in LispM UI's file dialog, which shows the
+pictures ComfyUI takes, and make it the image NODE's widget NAME loads.
+Nothing is uploaded when none is chosen."
+  (when-let* ((file (lispm-ui-choose-file :title "Upload an Image"
+                                          :predicate #'lispm-comfyui--image-file-p
+                                          :preview t))
+              (buffer (current-buffer))
+              (id (lispm-comfyui-node-id node)))
     (setq lispm-comfyui--status (format "Uploading %s…" (file-name-nondirectory file)))
     (lispm-comfyui--draw-soon)
     (lispm-comfyui-upload-image
