@@ -44,7 +44,7 @@
       (and create
            (let ((buffer (generate-new-buffer (lispm-comfyui--buffer-name nil))))
              (with-current-buffer buffer (lispm-comfyui-mode))
-             (display-buffer buffer)
+             (display-buffer (with-current-buffer buffer (lispm-comfyui--view-buffer)))
              buffer))
       (error "No ComfyUI workflow is open; the user opens one with M-x lispm-comfyui")))
 
@@ -453,7 +453,9 @@ was done, a string."
         (when-let* ((shown (seq-find (lambda (entry) (eq (car entry) lispm-comfyui--graph)) added)))
           (setq lispm-comfyui--selected (lispm-comfyui-node-id (cdr shown))
                 lispm-comfyui--focus 0)))
-      (when added (lispm-comfyui--fit) (lispm-comfyui--draw))
+      (when added
+        (when (eq lispm-comfyui--current-view 'graph) (lispm-comfyui--fit))
+        (lispm-comfyui--draw))
       (let ((missing (lispm-comfyui-tools--missing root (lispm-comfyui--types))))
         (concat (string-join (nreverse done) "; ") "."
                 (if missing (concat "\nStill missing: " (string-join missing "; ") ".") ""))))))
@@ -544,7 +546,7 @@ Those of nodes inside subgraphs numbered by their paths."
       (error "The workflow open has changes not saved; ask the user to save it first"))
     (save-window-excursion (lispm-comfyui-open name))
     (let ((buffer (car (lispm-comfyui--canvas-buffers))))
-      (display-buffer buffer)
+      (display-buffer (with-current-buffer buffer (lispm-comfyui--view-buffer)))
       (lispm-comfyui-tools-describe buffer))))
 
 (lispm-deftool comfyui_save ((name string "The name to save it under; the one it has by default." :optional t))

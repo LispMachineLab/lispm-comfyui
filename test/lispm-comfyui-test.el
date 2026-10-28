@@ -63,7 +63,8 @@ Whole numbers are integers, as JSON does not tell 8 from 8.0."
 (defmacro lispm-comfyui-test--with-canvas (&rest body)
   "Run BODY in a buffer showing the test workflow, its types known."
   (declare (indent 0))
-  `(let ((lispm-comfyui-url "http://comfy.test:8188")
+  `(let ((lispm-comfyui-default-view 'graph)
+         (lispm-comfyui-url "http://comfy.test:8188")
          (lispm-comfyui--types (make-hash-table :test #'equal)))
      (puthash "http://comfy.test:8188" (lispm-comfyui-test--types) lispm-comfyui--types)
      (with-temp-buffer
@@ -1018,6 +1019,507 @@ workflows were drawn anew onto `redrawn'."
             (push widget widgets)))
         (forward-char 1)))
     (widget-apply-action (nth (or nth 0) (nreverse widgets)))))
+
+;;;; The simple view
+
+(defmacro lispm-comfyui-test--with-simple (&rest body)
+  "Run BODY with `workflow' and its `form', without server requests.
+The workflow owns the test graph and undo history; the form is shown
+in its window.  Both views and their timers are cleaned up afterwards."
+  (declare (indent 0))
+  `(lispm-comfyui-test--with-canvas
+     (save-window-excursion
+       (let ((workflow (current-buffer)) (form nil))
+         (cl-letf (((symbol-function 'lispm-comfyui--workflows-ensure) #'ignore))
+           (unwind-protect
+               (progn
+                 (set-window-buffer (selected-window) workflow)
+                 (setq lispm-comfyui--current-view 'simple)
+                 (setq form (lispm-comfyui-simple-show))
+                 (with-current-buffer workflow ,@body))
+             (when (buffer-live-p form)
+               (with-current-buffer form
+                 (let ((kill-buffer-query-functions nil)) (kill-buffer form))))
+             (when (buffer-live-p workflow)
+               (with-current-buffer workflow
+                 (setq lispm-comfyui--modified nil)
+                 (when lispm-comfyui--timer
+                   (cancel-timer lispm-comfyui--timer))))))))))
+
+(defun lispm-comfyui-test--simple-value (id name)
+  "Return node ID's widget NAME in the current workflow."
+  (cdr (assoc name (lispm-comfyui-node-widget-alist
+                   (lispm-comfyui-node lispm-comfyui--graph id)
+                   (lispm-comfyui--types)))))
+
+(ert-deftest lispm-comfyui-test-simple-text-padding ()
+  "Drawing finishes with every one-line field's padding hidden and aligned.
+A numeric COMBO must not abort drawing before LispM UI shapes the fields;
+redrawing and synchronizing graph edits must retain the same geometry."
+  (lispm-comfyui-test--with-canvas
+    (let* ((workflow (current-buffer))
+           (definition (gethash "CheckpointLoaderSimple" (lispm-comfyui--types)))
+           (form nil)
+           (lispm-ui-form-mode-hook
+            (cons (lambda () (setq form (current-buffer))) lispm-ui-form-mode-hook)))
+      ;; Numeric choices reproduce the interrupted draw that left all of
+      ;; the preceding Common fields' 200 padding characters visible.
+      (setf (alist-get 'ckpt_name (alist-get 'required (alist-get 'input definition))) [[0 1]]
+            (lispm-comfyui-node-values (lispm-comfyui-node lispm-comfyui--graph 4)) '(1))
+      (setq lispm-comfyui--current-view 'simple)
+      (unwind-protect
+          (save-window-excursion
+            (switch-to-buffer (lispm-comfyui-simple-buffer))
+            (cl-labels
+                ((check-padding ()
+                   (let ((count 0))
+                     (dolist (entry lispm-ui-form--fields)
+                       (when (eq (plist-get (cdr entry) :type) 'text)
+                         (cl-incf count)
+                         (let* ((field (alist-get (car entry) (lispm-ui-form-widgets)))
+                                (end (widget-field-end field))
+                                (padding (widget-field-text-end field)))
+                           (should (stringp (lispm-ui-form-value (car entry))))
+                           (should (< padding (1- end)))
+                           (should-not (text-property-not-all padding (1- end) 'invisible t))
+                           (should-not (get-text-property (1- end) 'invisible))
+                           (should (equal (get-text-property (1- end) 'display)
+                                          `(space :align-to (,(plist-get lispm-ui-form--geometry :right))))))))
+                     (should (> count 0)))))
+              (check-padding)
+              (lispm-ui-form-redraw)
+              (check-padding)
+              (with-current-buffer workflow
+                (lispm-comfyui--set (lispm-comfyui-node lispm-comfyui--graph 3) "steps" 28))
+              (check-padding)
+              (with-current-buffer workflow (lispm-comfyui-undo))
+              (check-padding)))
+        (when (buffer-live-p form) (kill-buffer form))
+        (setq lispm-comfyui--modified nil)))))
+
+(ert-deftest lispm-comfyui-test-simple-fields ()
+  "Common controls precede every node, ordered by data flow rather than position."
+  (lispm-comfyui-test--with-canvas
+    ;; Saved list order and canvas coordinates must not decide dependencies.
+    (setf (lispm-comfyui-graph-nodes lispm-comfyui--graph)
+          (reverse (lispm-comfyui-graph-nodes lispm-comfyui--graph)))
+    (let* ((fields (lispm-comfyui-simple--fields))
+           (headings (seq-filter (lambda (field)
+                                   (and (eq (plist-get (cdr field) :type) 'heading)
+                                        (plist-get (cdr field) :node-id))) fields))
+           (ids (mapcar (lambda (field) (plist-get (cdr field) :node-id)) headings)))
+      (should (= (length headings) 11))
+      (should (= (length (delete-dups (copy-sequence ids))) 11))
+      (should (equal (plist-get (cdr (assq 'common fields)) :label) "Common"))
+      (dolist (key '(common-6-text common-7-text common-3-seed common-3-seed/control
+                    common-3-steps common-3-cfg common-3-sampler_name common-3-scheduler
+                    common-3-denoise common-5-width common-5-height common-5-batch_size))
+        (should (assq key fields))
+        (should (< (cl-position key fields :key #'car)
+                   (cl-position (caar headings) fields :key #'car))))
+      (should (eq (plist-get (cdr (assq 'common-6-text fields)) :type) 'text-area))
+      (should (eq (plist-get (cdr (assq 'widget-3-sampler_name fields)) :type) 'choice))
+      (should (eq (plist-get (cdr (assq 'widget-3-cfg fields)) :type) 'text))
+      (should (equal (plist-get (cdr (assq 'node-6 fields)) :label) "Positive #6"))
+      (dolist (link (lispm-comfyui-graph-links lispm-comfyui--graph))
+        (should (< (cl-position (lispm-comfyui-link-from link) ids)
+                   (cl-position (lispm-comfyui-link-to link) ids)))))))
+
+(ert-deftest lispm-comfyui-test-simple-widget-undo ()
+  "Typing a field edits the shared graph; form undo and redo restore it."
+  (lispm-comfyui-test--with-simple
+    (with-current-buffer form
+      (lispm-comfyui-test--form-text 'common-3-steps "28")
+      (should (equal (lispm-ui-form-value 'common-3-steps) "28")))
+    (should (= (lispm-comfyui-test--simple-value 3 "steps") 28))
+    (should lispm-comfyui--modified)
+    (should (= (length lispm-comfyui--undo) 1))
+    (with-current-buffer form (lispm-comfyui-simple-undo))
+    (should (= (lispm-comfyui-test--simple-value 3 "steps") 20))
+    (with-current-buffer form
+      (should (equal (lispm-ui-form-value 'common-3-steps) "20"))
+      (lispm-comfyui-simple-redo))
+    (should (= (lispm-comfyui-test--simple-value 3 "steps") 28))))
+
+(ert-deftest lispm-comfyui-test-simple-links ()
+  "Input choices show compatible outputs and relink through graph undo."
+  (lispm-comfyui-test--with-simple
+    (with-current-buffer form
+      (let* ((field (assq 'input-3-positive lispm-ui-form--fields))
+             (choices (plist-get (cdr field) :choices)))
+        (when (functionp choices) (setq choices (funcall choices)))
+        (should (assoc '(7 . 0) choices))
+        ;; MODEL and LATENT are not CONDITIONING; a wildcard reroute is valid.
+        (should-not (assoc '(4 . 0) choices))
+        (should-not (assoc '(5 . 0) choices))
+        (should (string-search "#7" (cdr (assoc '(7 . 0) choices))))
+        (lispm-ui-form--changed 'input-3-positive '(7 . 0))))
+    (should (= (lispm-comfyui-link-from
+                (lispm-comfyui-input-link lispm-comfyui--graph
+                                         (lispm-comfyui-node lispm-comfyui--graph 3) 1)) 7))
+    (with-current-buffer form (lispm-comfyui-simple-undo))
+    (should (= (lispm-comfyui-link-from
+                (lispm-comfyui-input-link lispm-comfyui--graph
+                                         (lispm-comfyui-node lispm-comfyui--graph 3) 1)) 6))
+    (with-current-buffer form (lispm-ui-form--changed 'input-3-positive nil))
+    (should-not (lispm-comfyui-input-link lispm-comfyui--graph
+                                        (lispm-comfyui-node lispm-comfyui--graph 3) 1))
+    (with-current-buffer form (lispm-comfyui-simple-undo))
+    (should (lispm-comfyui-input-link lispm-comfyui--graph
+                                    (lispm-comfyui-node lispm-comfyui--graph 3) 1))))
+
+(ert-deftest lispm-comfyui-test-simple-numbers ()
+  "Incomplete, malformed and out-of-range numbers never change the model."
+  (lispm-comfyui-test--with-simple
+    (dolist (text '("" "-" "1e" "1.2.3" "3junk" "0" "10001" "2.5"))
+      (with-current-buffer form (lispm-ui-form--changed 'widget-3-steps text))
+      (should (= (lispm-comfyui-test--simple-value 3 "steps") 20))
+      (should-not lispm-comfyui--undo))
+    (with-current-buffer form (lispm-ui-form--changed 'widget-3-steps "30"))
+    (should (= (lispm-comfyui-test--simple-value 3 "steps") 30))
+    (with-current-buffer form (lispm-ui-form--changed 'widget-3-cfg "1e1"))
+    (should (= (lispm-comfyui-test--simple-value 3 "cfg") 10.0))))
+
+(ert-deftest lispm-comfyui-test-simple-external-change ()
+  "Canvas and agent model changes refresh values and structural fields."
+  (lispm-comfyui-test--with-simple
+    (lispm-comfyui--set (lispm-comfyui-node lispm-comfyui--graph 3) "steps" 42)
+    (with-current-buffer form
+      (should (equal (lispm-ui-form-value 'widget-3-steps) "42"))
+      (should (equal (lispm-ui-form-value 'common-3-steps) "42")))
+    (let ((id nil))
+      (lispm-comfyui--change
+        (setq id (lispm-comfyui-node-id
+                  (lispm-comfyui-graph-add-node lispm-comfyui--graph
+                                               (lispm-comfyui--types) "LoadImage"))))
+      (with-current-buffer form
+        (should (assq (intern (format "node-%s" id)) lispm-ui-form--fields))
+        (should (assq (intern (format "common-%s-image" id)) lispm-ui-form--fields)))
+      (lispm-comfyui-undo)
+      (with-current-buffer form
+        (should-not (assq (intern (format "node-%s" id)) lispm-ui-form--fields))))))
+
+(ert-deftest lispm-comfyui-test-simple-dynamic-and-boolean ()
+  "Dynamic choices rebuild their fields and booleans remain JSON booleans."
+  (lispm-comfyui-test--with-simple
+    (let ((id nil))
+      (lispm-comfyui--change
+        (setq id (lispm-comfyui-node-id
+                  (lispm-comfyui-graph-add-node lispm-comfyui--graph
+                                               (lispm-comfyui--types) "FormatsNode"))))
+      (with-current-buffer form
+        (let ((format-key (intern (format "widget-%s-format" id)))
+              (check-key (intern (format "widget-%s-save_output" id))))
+          (should (eq (plist-get (cdr (assq check-key lispm-ui-form--fields)) :type) 'check))
+          (lispm-ui-form--changed check-key nil)
+          (lispm-ui-form--changed format-key "video/h264-mp4")
+          ;; A text notification defers a structural redraw; explicit redraw
+          ;; exercises the same pending schema without waiting on a timer.
+          (lispm-ui-form-redraw)
+          (should (assq (intern (format "widget-%s-crf" id)) lispm-ui-form--fields))))
+      (should (eq (lispm-comfyui-test--simple-value id "save_output") :false)))))
+
+(ert-deftest lispm-comfyui-test-simple-status-keeps-point ()
+  "Run status changes preserve the editing field and do not redraw all controls."
+  (lispm-comfyui-test--with-simple
+    (let ((place nil) (widget nil) (redraws 0))
+      (with-current-buffer form
+        (setq widget (alist-get 'widget-3-steps (lispm-ui-form-widgets)))
+        (goto-char (1+ (widget-field-start widget)))
+        (setq place (lispm-ui-form--place)))
+      (cl-letf (((symbol-function 'lispm-ui-form--draw)
+                 (lambda () (cl-incf redraws))))
+        (setq lispm-comfyui--status "Running 4 / 20")
+        (lispm-comfyui--draw))
+      (should (= redraws 0))
+      (with-current-buffer form
+        (should (equal (lispm-ui-form--place) place))
+        (should (eq (alist-get 'widget-3-steps (lispm-ui-form-widgets)) widget))
+        (should (string-search "Running 4 / 20" (buffer-string)))))))
+
+(ert-deftest lispm-comfyui-test-simple-toggle ()
+  "Switching reuses the same workflow, form, window and graph history."
+  (lispm-comfyui-test--with-simple
+    (let ((main (selected-window)) (graph lispm-comfyui--root))
+      (should (eq (window-buffer main) form))
+      (should (eq (keymap-lookup lispm-comfyui-mode-map "v") #'lispm-comfyui-toggle-view))
+      (with-current-buffer form
+        (should (derived-mode-p 'lispm-ui-form-mode))
+        (should (eq lispm-comfyui-simple--workflow workflow))
+        (call-interactively (keymap-lookup lispm-comfyui-simple-mode-map "C-c C-v")))
+      (should (eq (buffer-local-value 'lispm-comfyui--current-view workflow) 'graph))
+      (should (eq (window-buffer main) workflow))
+      (with-current-buffer workflow (lispm-comfyui-toggle-view))
+      (should (eq (buffer-local-value 'lispm-comfyui--current-view workflow) 'simple))
+      (should (eq (window-buffer main) form))
+      (should (eq (buffer-local-value 'lispm-comfyui--root workflow) graph))
+      (should-not (buffer-local-value 'lispm-comfyui--undo workflow)))))
+
+(ert-deftest lispm-comfyui-test-simple-text-point-and-keys ()
+  "Typing uses field keys, keeps point and does not lay out or draw a canvas."
+  (lispm-comfyui-test--with-simple
+    (with-current-buffer form
+      (let ((widget (alist-get 'widget-6-text (lispm-ui-form-widgets))))
+        (goto-char (1+ (widget-field-start widget)))
+        (should (eq (key-binding (kbd "v")) #'self-insert-command))
+        (should (eq (key-binding (kbd "C-/")) #'lispm-comfyui-simple-undo))
+        (cl-letf (((symbol-function 'lispm-comfyui--relayout)
+                   (lambda () (ert-fail "Simple typing laid out the canvas")))
+                  ((symbol-function 'lispm-comfyui-canvas-svg)
+                   (lambda (&rest _) (ert-fail "Simple typing rendered the canvas"))))
+          (let ((last-command-event ?v)) (call-interactively (key-binding (kbd "v")))))
+        (should (eq (buffer-local-value 'lispm-comfyui--current-view workflow) 'simple))
+        (should (eq (alist-get 'widget-6-text (lispm-ui-form-widgets)) widget))
+        (should (equal (lispm-ui-form--place) '(widget-6-text . 2)))))
+    (should (string-prefix-p "av photo" (lispm-comfyui-test--simple-value 6 "text")))))
+
+(ert-deftest lispm-comfyui-test-simple-invalid-corrected-undo ()
+  "A corrected numeric draft and its duplicate follow subsequent graph undo."
+  (lispm-comfyui-test--with-simple
+    (with-current-buffer form
+      (lispm-comfyui-test--form-text 'common-3-steps "-")
+      (should lispm-comfyui-simple--problems)
+      (should-error (lispm-comfyui-simple-save) :type 'user-error)
+      (lispm-comfyui-test--form-text 'common-3-steps "35")
+      (should-not lispm-comfyui-simple--problems)
+      (should (equal (lispm-ui-form-value 'widget-3-steps) "35"))
+      (lispm-comfyui-simple-undo)
+      (should (equal (lispm-ui-form-value 'common-3-steps) "20"))
+      (should (equal (lispm-ui-form-value 'widget-3-steps) "20")))
+    (should (= (lispm-comfyui-test--simple-value 3 "steps") 20))))
+
+(ert-deftest lispm-comfyui-test-simple-last-run-images ()
+  "Only the latest run's fetched images appear, as read-only graphical fields."
+  (lispm-comfyui-test--with-canvas
+    (should-not (lispm-comfyui-simple--output-fields))
+    (let ((lispm-comfyui--runs '((:status done :files ("/latest-a.png" "/latest-b.png"))
+                                (:status done :files ("/older.png"))))
+          (lispm-comfyui--images '(("9" . ("/stale-node-image.png")))))
+      (cl-letf (((symbol-function 'file-readable-p) (lambda (_file) t))
+                ((symbol-function 'display-images-p) (lambda (&optional _) t))
+                ((symbol-function 'create-image)
+                 (lambda (file &rest _) (list 'image :type 'png :file file))))
+        (let* ((fields (lispm-comfyui-simple--output-fields))
+               (images (cdr fields)))
+          (should (equal (plist-get (cdar fields) :label) "Last run"))
+          (should (= (length images) 2))
+          (should (equal
+                   (mapcar (lambda (field)
+                             (should (eq (plist-get (cdr field) :type) 'status))
+                             (should-not (plist-get (cdr field) :on-change))
+                             (plist-get (cdr (get-text-property 0 'display
+                                                              (plist-get (cdr field) :value))) :file))
+                           images)
+                   '("/latest-a.png" "/latest-b.png"))))))))
+
+(ert-deftest lispm-comfyui-test-simple-sidebar-numeric-choice ()
+  "A saved numeric combo opens from the sidebar with text labels and typed values."
+  (lispm-comfyui-test--with-sidebar
+    (let* ((lispm-comfyui-default-view 'simple)
+           (workflow (current-buffer))
+           (types (lispm-comfyui--types))
+           (graph (lispm-comfyui-test--graph))
+           (buffers (buffer-list))
+           (read-callback nil)
+           (node nil))
+      (puthash "NumericChoice"
+               '((name . "NumericChoice") (display_name . "Numeric Choice")
+                 (input (required (level . [[0 1]]))) (output . ["INT"]))
+               types)
+      (setq node (lispm-comfyui-graph-add-node graph types "NumericChoice"))
+      ;; Imported workflows keep the combo's JSON number, not a string.
+      (setf (lispm-comfyui-node-values node) '(1))
+      (lispm-comfyui--set-root (lispm-comfyui-graph-create))
+      (funcall (car requests) '("numeric-choice.json") nil)
+      (unwind-protect
+          (cl-letf (((symbol-function 'lispm-comfyui-read-workflow)
+                     (lambda (_name callback) (setq read-callback callback))))
+            (select-window sidebar)
+            (lispm-comfyui-workflows-open)
+            (should read-callback)
+            (funcall read-callback (lispm-comfyui-graph-json graph) nil)
+            ;; A successful open refreshes the library beside the new form.
+            (when (> (length requests) 1)
+              (funcall (car requests) '("numeric-choice.json") nil))
+            (with-current-buffer (window-buffer sidebar)
+              (should-not lispm-comfyui--workflows-status)
+              (should-not (string-search "Wrong type argument" (buffer-string))))
+            (let ((form (window-buffer main))
+                  (key (lispm-comfyui-simple--key 'widget (lispm-comfyui-node-id node) "level")))
+              (should (eq (buffer-local-value 'lispm-comfyui-simple--workflow form) workflow))
+              (with-current-buffer form
+                (should (equal (plist-get (cdr (assq key lispm-ui-form--fields)) :choices)
+                               '((0 . "0") (1 . "1"))))
+                (should (eql (lispm-ui-form-value key) 1))
+                (should (equal (widget-get (alist-get key (lispm-ui-form-widgets)) :tag)
+                               "1 ▾"))
+                (lispm-ui-form--changed key 0))
+              (with-current-buffer workflow
+                (should (eql (lispm-comfyui-test--simple-value
+                              (lispm-comfyui-node-id node) "level") 0)))
+              (with-current-buffer form (lispm-comfyui-simple-undo))
+              (with-current-buffer workflow
+                (should (eql (lispm-comfyui-test--simple-value
+                              (lispm-comfyui-node-id node) "level") 1)))
+              (let ((failure (should-error (lispm-comfyui-check-value [[0 1]] 2)
+                                            :type 'lispm-comfyui-error)))
+                (should (string-search "not among the choices" (error-message-string failure))))))
+        ;; Even a failed construction leaves a partial form to clean up.
+        (dolist (buffer (seq-difference (buffer-list) buffers #'eq))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (when (derived-mode-p 'lispm-comfyui-simple-mode)
+                (let ((kill-buffer-query-functions nil)) (kill-buffer buffer))))))))))
+
+(ert-deftest lispm-comfyui-test-simple-queue-status ()
+  "A server queue message updates the form even without a workflow run."
+  (lispm-comfyui-test--with-simple
+    (let ((lispm-comfyui--queue-remaining 0))
+      (cl-letf (((symbol-function 'lispm-comfyui--draw-soon) #'lispm-comfyui--draw))
+        (lispm-comfyui--on-message
+         "status" '((status (exec_info (queue_remaining . 3))))))
+      (with-current-buffer form
+        (should (string-search "3 in the server's queue" (buffer-string)))))))
+
+(ert-deftest lispm-comfyui-test-simple-sidebar-and-tools ()
+  "The form keeps the sidebar's workflow mark and the agents' owning buffer."
+  (lispm-comfyui-test--with-sidebar
+    (let ((workflow (current-buffer)) (form nil))
+      (unwind-protect
+          (progn
+            (setq lispm-comfyui--name "alpha.json")
+            (funcall (car requests) '("alpha.json" "beta.json") nil)
+            (lispm-comfyui-toggle-view)
+            (setq form (window-buffer main))
+            (should (eq (buffer-local-value 'lispm-comfyui-simple--workflow form) workflow))
+            (should (eq (window-parameter main 'lispm-comfyui-workflows) sidebar))
+            (with-current-buffer form
+              (should (eq (car (lispm-comfyui--canvas-buffers)) workflow))
+              (when (fboundp 'lispm-comfyui-tools--buffer)
+                (should (eq (lispm-comfyui-tools--buffer) workflow)))
+              (lispm-comfyui-simple-show-workflows))
+            (should (eq (selected-window) sidebar))
+            (with-current-buffer (window-buffer sidebar)
+              (lispm-comfyui--workflows-draw)
+              (should (string-search "  • alpha\n" (buffer-string)))
+              (lispm-comfyui-show-workflows))
+            (should (eq (selected-window) main))
+            (should (eq (window-buffer main) form)))
+        (when (buffer-live-p form)
+          (with-current-buffer form
+            (let ((kill-buffer-query-functions nil)) (kill-buffer form))))))))
+
+(ert-deftest lispm-comfyui-test-simple-common-optional ()
+  "Image and LoRA Common controls are found only in workflows containing them."
+  (lispm-comfyui-test--with-canvas
+    (let ((types (lispm-comfyui--types)))
+      (puthash "LoraLoader"
+               '((name . "LoraLoader") (display_name . "Load LoRA")
+                 (input (required (strength_model . ["FLOAT" ((default . 1.0) (min . -20) (max . 20))])
+                                  (strength_clip . ["FLOAT" ((default . 1.0) (min . -20) (max . 20))])))
+                 (output . ["MODEL" "CLIP"]) (output_name . ["MODEL" "CLIP"]))
+               types)
+      (let* ((image (lispm-comfyui-graph-add-node lispm-comfyui--graph types "LoadImage"))
+             (lora (lispm-comfyui-graph-add-node lispm-comfyui--graph types "LoraLoader"))
+             (fields (lispm-comfyui-simple--fields)))
+        (dolist (entry `((,image . "image") (,lora . "strength_model") (,lora . "strength_clip")))
+          (should (assq (intern (format "common-%s-%s" (lispm-comfyui-node-id (car entry)) (cdr entry)))
+                        fields)))))))
+
+(ert-deftest lispm-comfyui-test-simple-open-entry-points ()
+  "New, startup and library entry points use a fresh default form."
+  (lispm-comfyui-test--with-canvas
+    (save-window-excursion
+      (let ((lispm-comfyui-default-view 'simple)
+            (workflow (current-buffer)) (form nil))
+        (cl-letf (((symbol-function 'lispm-comfyui--workflows-ensure) #'ignore)
+                  ((symbol-function 'lispm-comfyui-read-workflow)
+                   (lambda (_name callback)
+                     (funcall callback (lispm-comfyui-test--json "workflow.json") nil))))
+          (unwind-protect
+              (progn
+                (lispm-comfyui--set-root (lispm-comfyui-graph-create))
+                (should (eq (lispm-comfyui-new) workflow))
+                (setq form (window-buffer))
+                (should (eq (buffer-local-value 'lispm-comfyui-simple--workflow form) workflow))
+                (with-current-buffer form (lispm-comfyui-simple-toggle-view))
+                (should (eq (window-buffer) workflow))
+                (lispm-comfyui)
+                (should (eq (window-buffer) form))
+                (should (eq (lispm-comfyui-open "api.json") workflow))
+                (should (eq (window-buffer) form))
+                (with-current-buffer workflow
+                  (should (equal lispm-comfyui--name "api.json"))
+                  (should (= (length (lispm-comfyui-graph-nodes lispm-comfyui--root)) 11))
+                  (setq lispm-comfyui--runs '((:status done :files ("/previous.png")))
+                        lispm-comfyui--status "Done earlier"))
+                (with-current-buffer form
+                  (lispm-ui-form--changed 'common-3-steps "-")
+                  (should lispm-comfyui-simple--problems))
+                ;; Reopening the same owner clears drafts and old output state.
+                (should (eq (lispm-comfyui-open "api.json") workflow))
+                (with-current-buffer form
+                  (should-not lispm-comfyui-simple--problems)
+                  (should (equal (lispm-ui-form-value 'common-3-steps) "20")))
+                (with-current-buffer workflow
+                  (should-not lispm-comfyui--runs)
+                  (should-not lispm-comfyui--status)))
+            (when (buffer-live-p form)
+              (with-current-buffer form
+                (let ((kill-buffer-query-functions nil)) (kill-buffer form))))))))))
+
+(ert-deftest lispm-comfyui-test-simple-opening-position ()
+  "Opening starts at the top; toggling views keeps the field and scroll position."
+  (lispm-comfyui-test--with-sidebar
+    (let ((lispm-comfyui-default-view 'simple)
+          (workflow (current-buffer)) (form nil))
+      (unwind-protect
+          (progn
+            (lispm-comfyui--set-root (lispm-comfyui-graph-create))
+            (should (eq (lispm-comfyui--show (lispm-comfyui-test--graph) "position.json") workflow))
+            (setq form (window-buffer main))
+            (with-current-buffer form
+              (should (equal (lispm-ui-form--place) '(actions . 0)))
+              (should (= (window-start main) (point-min)))
+              (let ((widget (alist-get 'input-12-images (lispm-ui-form-widgets))))
+                (goto-char (widget-get widget :from)))
+              (set-window-start main (line-beginning-position) t)
+              (let ((place (lispm-ui-form--place)) (start (window-start main)))
+                (should (> start (point-min)))
+                (lispm-comfyui-simple-toggle-view)
+                (with-current-buffer workflow (lispm-comfyui-toggle-view))
+                (should (eq (window-buffer main) form))
+                (should (equal (lispm-ui-form--place) place))
+                (should (= (window-start main) start))))
+            (should (eq (lispm-comfyui--show (lispm-comfyui-test--graph) "position.json") workflow))
+            (with-current-buffer form
+              (should (equal (lispm-ui-form--place) '(actions . 0)))
+              (should (= (window-start main) (point-min)))
+              (should (= (window-vscroll main t) 0))))
+        (when (buffer-live-p form)
+          (with-current-buffer form
+            (let ((kill-buffer-query-functions nil)) (kill-buffer form))))))))
+
+(ert-deftest lispm-comfyui-test-simple-default ()
+  "The default is simple, and each opened workflow respects customization."
+  (should (eq (default-value 'lispm-comfyui-default-view) 'simple))
+  (dolist (view '(simple graph))
+    (lispm-comfyui-test--with-canvas
+      (save-window-excursion
+        (let ((lispm-comfyui-default-view view)
+              (workflow (current-buffer)) (form nil))
+          (cl-letf (((symbol-function 'lispm-comfyui--workflows-ensure) #'ignore))
+            (unwind-protect
+                (progn
+                  (lispm-comfyui--set-root (lispm-comfyui-graph-create))
+                  (should (eq (lispm-comfyui--show (lispm-comfyui-test--graph) nil) workflow))
+                  (with-current-buffer workflow
+                    (setq form lispm-comfyui--simple-buffer)
+                    (should (eq lispm-comfyui--current-view view)))
+                  (should (eq (window-buffer) (if (eq view 'simple) form workflow))))
+              (when (buffer-live-p form)
+                (with-current-buffer form
+                  (let ((kill-buffer-query-functions nil)) (kill-buffer form)))))))))))
 
 (ert-deftest lispm-comfyui-test-settings-form ()
   "The settings are a form: the address, the colours and the font, saved."
