@@ -72,6 +72,346 @@ Whole numbers are integers, as JSON does not tell 8 from 8.0."
        (lispm-comfyui--relayout)
        ,@body)))
 
+;;;; The workflows sidebar
+
+(defmacro lispm-comfyui-test--with-sidebar (&rest body)
+  "Run BODY with a sidebar whose list requests wait in `requests'.
+`main' and `sidebar' are its windows; no request reaches a server."
+  (declare (indent 0))
+  `(lispm-comfyui-test--with-canvas
+     (save-window-excursion
+       (delete-other-windows)
+       (set-window-buffer (selected-window) (current-buffer))
+       (let ((main (selected-window)) (sidebar nil) (requests nil))
+         (cl-letf (((symbol-function 'lispm-comfyui-list-workflows)
+                    (lambda (callback) (push callback requests)))
+                   ((symbol-function 'lispm-comfyui--draw-soon) #'ignore))
+           (unwind-protect
+               (progn
+                 (setq sidebar (lispm-comfyui--workflows-ensure))
+                 ,@body)
+             (when (window-live-p sidebar)
+               (kill-buffer (window-buffer sidebar)))))))))
+
+(ert-deftest lispm-comfyui-test-workflows-list ()
+  "The sidebar appears on the left and fills when the library answers."
+  (lispm-comfyui-test--with-sidebar
+    (setq lispm-comfyui--name "beta.json")
+    (should (= (window-total-width sidebar) lispm-comfyui-sidebar-width))
+    (should (< (car (window-edges sidebar)) (car (window-edges main))))
+    (should (eq (selected-window) main))
+    (with-current-buffer (window-buffer sidebar)
+      (should (string-search "Reading workflows…" (buffer-string))))
+    (funcall (car requests) '("alpha.json" "beta.json") nil)
+    (with-current-buffer (window-buffer sidebar)
+      (should buffer-read-only)
+      (should (string-search "Workflows" (buffer-string)))
+      (should (string-search "  • beta\n" (buffer-string)))
+      (should (equal (get-text-property (point) 'lispm-comfyui-workflow) "beta.json"))
+      (should-not lispm-comfyui--workflows-timer))
+    (call-interactively (keymap-lookup lispm-comfyui-mode-map "w"))
+    (should (eq (selected-window) sidebar))
+    (call-interactively (keymap-lookup lispm-comfyui-workflows-mode-map "p"))
+    (should (equal (get-text-property (point) 'lispm-comfyui-workflow) "alpha.json"))
+    (call-interactively (keymap-lookup lispm-comfyui-workflows-mode-map "<down>"))
+    (should (equal (get-text-property (point) 'lispm-comfyui-workflow) "beta.json"))
+    (lispm-comfyui-workflows-next)
+    (should (equal (get-text-property (point) 'lispm-comfyui-workflow) "beta.json"))
+    (goto-char (point-min))
+    (lispm-comfyui-workflows-next)
+    (should (equal (get-text-property (point) 'lispm-comfyui-workflow) "alpha.json"))
+    (call-interactively (keymap-lookup lispm-comfyui-workflows-mode-map "w"))
+    (should (eq (selected-window) main))))
+
+(ert-deftest lispm-comfyui-test-workflows-empty-and-error ()
+  "An empty library or an unavailable server is explained in one line."
+  (lispm-comfyui-test--with-sidebar
+    (funcall (car requests) nil nil)
+    (with-current-buffer (window-buffer sidebar)
+      (should (string-search "No workflows in the library." (buffer-string)))
+      (call-interactively (keymap-lookup lispm-comfyui-workflows-mode-map "g")))
+    (funcall (car requests) nil "No answer\nTry Settings")
+    (with-current-buffer (window-buffer sidebar)
+      (should (string-search "Cannot list workflows: No answer Try Settings\n" (buffer-string)))
+      (should-not (string-search "No workflows in the library." (buffer-string))))))
+
+(ert-deftest lispm-comfyui-test-workflows-late-replies ()
+  "Refresh, timeout and server changes discard replies that no longer apply."
+  (lispm-comfyui-test--with-sidebar
+    (let ((old (car requests)))
+      (with-current-buffer (window-buffer sidebar) (lispm-comfyui-workflows-refresh))
+      (funcall (car requests) '("new.json") nil)
+      (funcall old '("old.json") nil)
+      (with-current-buffer (window-buffer sidebar)
+        (should (equal lispm-comfyui--workflows-names '("new.json")))
+        (lispm-comfyui-workflows-refresh)
+        (funcall (timer--function lispm-comfyui--workflows-timer))
+        (funcall (car requests) '("late.json") nil)
+        (should (string-search "The server did not answer." (buffer-string)))
+        (lispm-comfyui-workflows-refresh))
+      (setq old (car requests)
+            lispm-comfyui-url "http://other.test:8188")
+      (lispm-comfyui--refresh-workflows)
+      (funcall old '("wrong-server.json") nil)
+      (funcall (car requests) '("right-server.json") nil)
+      (with-current-buffer (window-buffer sidebar)
+        (should (equal lispm-comfyui--workflows-names '("right-server.json")))))))
+
+(ert-deftest lispm-comfyui-test-workflows-open ()
+  "RET reads asynchronously and shows the chosen workflow in the main pane."
+  (lispm-comfyui-test--with-sidebar
+    (funcall (car requests) '("alpha.json") nil)
+    (let ((read-name nil) (read-callback nil) (shown nil))
+      (cl-letf (((symbol-function 'lispm-comfyui-read-workflow)
+                 (lambda (name callback) (setq read-name name read-callback callback)))
+                ((symbol-function 'lispm-comfyui--show)
+                 (lambda (graph name) (setq shown (list graph name (selected-window))))))
+        (select-window sidebar)
+        (call-interactively (keymap-lookup lispm-comfyui-workflows-mode-map "RET"))
+        (should (equal read-name "alpha.json"))
+        (should-not shown)
+        (funcall read-callback (lispm-comfyui-test--json "workflow.json") nil)
+        (should (lispm-comfyui-graph-p (car shown)))
+        (should (equal (cadr shown) "alpha.json"))
+        (should (eq (nth 2 shown) main))
+        (should-not lispm-comfyui--workflows-open-timer)))))
+
+(ert-deftest lispm-comfyui-test-workflows-mouse-open ()
+  "A click reads its entry, including when another entry was at point."
+  (lispm-comfyui-test--with-sidebar
+    (funcall (car requests) '("alpha.json" "beta.json") nil)
+    (let ((opened nil))
+      (cl-letf (((symbol-function 'lispm-comfyui-read-workflow)
+                 (lambda (name _callback) (setq opened name))))
+        (with-current-buffer (window-buffer sidebar)
+          (let* ((position (save-excursion (forward-line 1) (point)))
+                 (last-input-event (list 'mouse-1 (list sidebar position '(4 . 5) 0))))
+            (call-interactively (keymap-lookup lispm-comfyui-workflows-mode-map "<mouse-1>"))))
+        (should (equal opened "beta.json"))))))
+
+(ert-deftest lispm-comfyui-test-workflows-open-late-and-error ()
+  "Failed reads stay in the sidebar; stale reads never replace the canvas."
+  (lispm-comfyui-test--with-sidebar
+    (funcall (car requests) '("alpha.json" "beta.json") nil)
+    (let ((reads nil))
+      (cl-letf (((symbol-function 'lispm-comfyui-read-workflow)
+                 (lambda (_name callback) (push callback reads)))
+                ((symbol-function 'lispm-comfyui--show)
+                 (lambda (&rest _) (ert-fail "A stale workflow was shown"))))
+        (with-current-buffer (window-buffer sidebar)
+          (lispm-comfyui-workflows-open)
+          (lispm-comfyui-workflows-next)
+          (lispm-comfyui-workflows-open)
+          (funcall (cadr reads) (lispm-comfyui-test--json "workflow.json") nil)
+          (funcall (car reads) nil "Not found")
+          (should (string-search "Cannot open workflow: Not found" (buffer-string)))
+          (lispm-comfyui-workflows-open)
+          (setq lispm-comfyui-url "http://other.test:8188")
+          (funcall (car reads) (lispm-comfyui-test--json "workflow.json") nil))))))
+
+(ert-deftest lispm-comfyui-test-workflows-start-and-save ()
+  "Showing the app and saving under either name refresh its library."
+  (lispm-comfyui-test--with-sidebar
+    (cl-letf (((symbol-function 'lispm-comfyui-write-workflow)
+               (lambda (_name _json callback) (funcall callback nil nil)))
+              ((symbol-function 'read-string) (lambda (&rest _) "renamed")))
+      (lispm-comfyui)
+      (should (= (length requests) 2))
+      (lispm-comfyui-save "saved")
+      (should (= (length requests) 3))
+      (lispm-comfyui-save-as)
+      (should (= (length requests) 4))
+      (funcall (car requests) '("renamed.json" "saved.json") nil)
+      (with-current-buffer (window-buffer sidebar)
+        (should (string-search "  • renamed\n" (buffer-string)))))))
+
+(ert-deftest lispm-comfyui-test-workflows-settings ()
+  "Saving a new address reads that server's library automatically."
+  (lispm-comfyui-test--with-sidebar
+    (cl-letf (((symbol-function 'lispm-comfyui-settings--save) #'set)
+              ((symbol-function 'lispm-comfyui-close-socket) #'ignore)
+              ((symbol-function 'lispm-comfyui-reload) #'ignore))
+      (lispm-comfyui-settings--apply
+       `((address . "http://other.test:8188") (colours . ,(if lispm-comfyui-dark 'dark 'emacs))
+         (font . ,lispm-comfyui-font)))
+      (should (= (length requests) 2))
+      (with-current-buffer (window-buffer sidebar)
+        (should (equal lispm-comfyui--workflows-server "http://other.test:8188"))))))
+
+(ert-deftest lispm-comfyui-test-workflows-show ()
+  "Opening uses the main pane and refreshes its mark without taking focus."
+  (lispm-comfyui-test--with-sidebar
+    (lispm-comfyui--set-root (lispm-comfyui-graph-create))
+    (funcall (car requests) '("opened.json") nil)
+    (let ((read-callback nil)
+          (other (split-window main nil 'below)))
+      (set-window-buffer other (get-buffer-create " *ComfyUI test other*"))
+      (unwind-protect
+          (cl-letf (((symbol-function 'lispm-comfyui-read-workflow)
+                     (lambda (_name callback) (setq read-callback callback))))
+            (with-current-buffer (window-buffer sidebar) (lispm-comfyui-workflows-open))
+            (select-window other)
+            (funcall read-callback (lispm-comfyui-test--json "workflow.json") nil)
+            (should (eq (selected-window) other))
+            (should (window-live-p other))
+            (should (= (length requests) 2))
+            (should (equal (buffer-local-value 'lispm-comfyui--name (window-buffer main)) "opened.json"))
+            (should (= (length (lispm-comfyui-graph-nodes
+                               (buffer-local-value 'lispm-comfyui--root (window-buffer main)))) 11))
+            (funcall (car requests) '("opened.json") nil)
+            (with-current-buffer (window-buffer sidebar)
+              (should (string-search "  • opened\n" (buffer-string)))))
+        (kill-buffer " *ComfyUI test other*")))))
+
+(ert-deftest lispm-comfyui-test-workflows-types-and-timeout ()
+  "Opening waits asynchronously for types and a timeout discards the read."
+  (lispm-comfyui-test--with-sidebar
+    (funcall (car requests) '("alpha.json") nil)
+    (let ((types-callback nil) (read-callback nil))
+      (cl-letf (((symbol-function 'lispm-comfyui-types-of-server)
+                 (lambda (callback &optional _) (setq types-callback callback)))
+                ((symbol-function 'lispm-comfyui-read-workflow)
+                 (lambda (_name callback) (setq read-callback callback)))
+                ((symbol-function 'lispm-comfyui--show)
+                 (lambda (&rest _) (ert-fail "A timed out workflow was shown"))))
+        (with-current-buffer (window-buffer sidebar)
+          (lispm-comfyui-workflows-open)
+          (should-not read-callback)
+          (funcall types-callback (lispm-comfyui-test--types) nil)
+          (should read-callback)
+          (funcall (timer--function lispm-comfyui--workflows-open-timer))
+          (should (string-search "The server did not answer." (buffer-string)))
+          (funcall read-callback (lispm-comfyui-test--json "workflow.json") nil)
+          (should-not lispm-comfyui--workflows-open-timer))))))
+
+(ert-deftest lispm-comfyui-test-workflows-window-changed ()
+  "A displayed canvas gets a sidebar and updates its mark on buffer changes."
+  (lispm-comfyui-test--with-canvas
+    (save-window-excursion
+      (delete-other-windows)
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((main (selected-window)) (sidebar nil) (calls 0))
+        (cl-letf (((symbol-function 'lispm-comfyui-list-workflows)
+                   (lambda (callback)
+                     (cl-incf calls)
+                     (funcall callback '("alpha.json" "beta.json") nil)))
+                  ((symbol-function 'lispm-comfyui--draw-soon) #'ignore))
+          (unwind-protect
+              (progn
+                (lispm-comfyui--window-changed main)
+                (setq sidebar (window-parameter main 'lispm-comfyui-workflows))
+                (should (window-live-p sidebar))
+                (setq lispm-comfyui--name "beta.json")
+                (lispm-comfyui--window-changed main)
+                (should (= calls 1))
+                (with-current-buffer (window-buffer sidebar)
+                  (should (string-search "  • beta\n" (buffer-string)))))
+            (when (window-live-p sidebar) (kill-buffer (window-buffer sidebar)))))))))
+
+;;;; The wheel
+
+(defmacro lispm-comfyui-test--with-wheel (&rest body)
+  "Run BODY with the test canvas in the selected window."
+  (declare (indent 0))
+  `(lispm-comfyui-test--with-canvas
+     (save-window-excursion
+       (set-window-buffer (selected-window) (current-buffer))
+       ,@body)))
+
+(ert-deftest lispm-comfyui-test-wheel-bindings ()
+  "The wheel zooms, Shift-wheel pans, also with precise scrolling on."
+  (require 'pixel-scroll)
+  (lispm-comfyui-test--with-wheel
+    (let ((pixel-scroll-precision-mode t))
+      (dolist (key '("<wheel-up>" "<wheel-down>" "C-<wheel-up>" "C-<wheel-down>"
+                     "<mouse-4>" "<mouse-5>"))
+        (should (eq (key-binding (kbd key)) #'lispm-comfyui-wheel-zoom)))
+      (should (eq (key-binding (kbd "S-<wheel-up>")) #'lispm-comfyui-wheel-up))
+      (should (eq (key-binding (kbd "S-<wheel-down>")) #'lispm-comfyui-wheel-down))
+      (should (eq (key-binding (kbd "<wheel-left>")) #'lispm-comfyui-wheel-left))
+      (should (eq (key-binding (kbd "<wheel-right>")) #'lispm-comfyui-wheel-right))
+      (should (eq (key-binding (kbd "<pinch>")) #'lispm-comfyui-pinch)))))
+
+(ert-deftest lispm-comfyui-test-wheel-zoom ()
+  "Wheel lines set the zoom, keeping the canvas point under the pointer."
+  (lispm-comfyui-test--with-wheel
+    (cl-letf (((symbol-function 'lispm-comfyui--draw-soon) #'ignore))
+      (setq lispm-comfyui--view '(20.0 30.0 1.0))
+      (let* ((position '(120 . 80))
+             (point (lispm-comfyui--canvas-point position))
+             (start (list (selected-window) 1 position 0)))
+        ;; The repeat count does not multiply the two lines turned.
+        (funcall (key-binding [wheel-up]) (list 'wheel-up start 50 2))
+        (should (< (abs (- (nth 2 lispm-comfyui--view) 1.21)) 0.000001))
+        (let ((after (lispm-comfyui--canvas-point position)))
+          (should (< (abs (- (car point) (car after))) 0.000001))
+          (should (< (abs (- (cdr point) (cdr after))) 0.000001)))
+        (funcall (key-binding [wheel-down]) (list 'wheel-down start 50 2))
+        (should (< (abs (- (nth 2 lispm-comfyui--view) 1.0)) 0.000001))
+        (should (< (abs (- (car lispm-comfyui--view) 20.0)) 0.000001))
+        (should (< (abs (- (cadr lispm-comfyui--view) 30.0)) 0.000001))))))
+
+(ert-deftest lispm-comfyui-test-wheel-precise-zoom ()
+  "Small touchpad events zoom as far in total as their combined delta."
+  (lispm-comfyui-test--with-wheel
+    (cl-letf (((symbol-function 'lispm-comfyui--draw-soon) #'ignore))
+      (setq lispm-comfyui--view '(0.0 0.0 1.0))
+      (let* ((start (list (selected-window) 1 '(100 . 80) 0))
+             (small (list 'wheel-up start 1 1 '(0 . -1))))
+        (lispm-comfyui-wheel-zoom small)
+        (should (< 1.0 (nth 2 lispm-comfyui--view) 1.01))
+        (dotimes (_ 39) (lispm-comfyui-wheel-zoom small))
+        (let ((many (copy-sequence lispm-comfyui--view)))
+          (setq lispm-comfyui--view '(0.0 0.0 1.0))
+          (lispm-comfyui-wheel-zoom (list 'wheel-up start 1 1 '(0 . -40)))
+          (cl-mapc (lambda (a b) (should (< (abs (- a b)) 0.000001)))
+                   many lispm-comfyui--view))
+        (let ((view (copy-sequence lispm-comfyui--view)))
+          (lispm-comfyui-wheel-zoom (list 'wheel-up start 1 1 '(0 . 0)))
+          (should (equal view lispm-comfyui--view)))))))
+
+(ert-deftest lispm-comfyui-test-wheel-pan ()
+  "Shift-wheel and sideways wheel turns pan without changing the scale."
+  (lispm-comfyui-test--with-wheel
+    (cl-letf (((symbol-function 'lispm-comfyui--draw-soon) #'ignore))
+      (setq lispm-comfyui--view '(0.0 0.0 2.0))
+      (let ((start (list (selected-window) 1 '(100 . 80) 0)))
+        (funcall (key-binding [S-wheel-up]) (list 'S-wheel-up start 1 3))
+        (should (equal lispm-comfyui--view '(0.0 -60.0 2.0)))
+        (funcall (key-binding [S-wheel-down]) (list 'S-wheel-down start 1 3))
+        (should (equal lispm-comfyui--view '(0.0 0.0 2.0)))
+        (funcall (key-binding [wheel-right]) (list 'wheel-right start 1 2))
+        (should (equal lispm-comfyui--view '(40.0 0.0 2.0)))
+        (funcall (key-binding [wheel-left]) (list 'wheel-left start 1 1 '(-80 . 0)))
+        (should (equal lispm-comfyui--view '(0.0 0.0 2.0)))
+        (funcall (key-binding [S-wheel-down]) (list 'S-wheel-down start 1 1 '(0 . 6)))
+        (should (equal lispm-comfyui--view '(0.0 3.0 2.0)))))))
+
+(ert-deftest lispm-comfyui-test-wheel-other-window ()
+  "Wheel events change the canvas under the pointer while the list has focus."
+  (lispm-comfyui-test--with-wheel
+    (cl-letf (((symbol-function 'lispm-comfyui--draw-soon) #'ignore))
+      (setq lispm-comfyui--view '(0.0 0.0 1.0))
+      (let* ((main (selected-window))
+             (canvas (current-buffer))
+             (side (split-window main 25 'left))
+             (start (list main 1 '(100 . 80) 0)))
+        (with-temp-buffer
+          (lispm-comfyui-workflows-mode)
+          (set-window-buffer side (current-buffer))
+          (select-window side)
+          (lispm-comfyui-wheel-zoom (list 'wheel-up start 1 1))
+          (should (eq (selected-window) side))
+          (should (equal lispm-comfyui--view '(0 0 1.0)))
+          (with-current-buffer canvas
+            (should (= (nth 2 lispm-comfyui--view) 1.1)))
+          (let ((before (buffer-local-value 'lispm-comfyui--view canvas)))
+            (lispm-comfyui-wheel-down (list 'S-wheel-down start 1 2))
+            (with-current-buffer canvas
+              (should (= (nth 2 lispm-comfyui--view) (nth 2 before)))
+              (should (> (cadr lispm-comfyui--view) (cadr before)))))
+          (should (eq (selected-window) side)))))))
+
 ;;;; Widgets
 
 (ert-deftest lispm-comfyui-test-widgets-named ()

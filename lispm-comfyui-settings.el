@@ -45,6 +45,7 @@
 (declare-function lispm-comfyui--canvas-buffers "lispm-comfyui")
 (declare-function lispm-comfyui-reload "lispm-comfyui")
 (declare-function lispm-comfyui--draw "lispm-comfyui")
+(declare-function lispm-comfyui--refresh-workflows "lispm-comfyui")
 
 (defconst lispm-comfyui-settings-title "LispM-ComfyUI Settings"
   "The title of the settings' form.")
@@ -61,10 +62,11 @@
   (customize-save-variable variable value))
 
 (defun lispm-comfyui-settings--redraw-workflows (&optional again)
-  "Draw the workflows open anew; with AGAIN, read the server's node types too."
+  "Draw the workflows open anew; with AGAIN, read the types and library too."
   (dolist (buffer (lispm-comfyui--canvas-buffers))
     (with-current-buffer buffer
-      (if again (lispm-comfyui-reload) (lispm-comfyui--draw)))))
+      (if again (lispm-comfyui-reload) (lispm-comfyui--draw))))
+  (when again (lispm-comfyui--refresh-workflows)))
 
 ;;;; The server
 
