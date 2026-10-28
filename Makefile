@@ -9,8 +9,12 @@ WEBSOCKET ?= $(firstword $(wildcard $(HOME)/.emacs.d/elpa/websocket-*))
 # application needs it not; with it on the load path, the tests of the
 # agents' tools run too.
 LISPM_AGENT ?= ../lisp_machine/lisp
+# LispM UI, whose forms the settings are, a checkout beside this one by
+# default.  Without it the settings are Customize's, their tests skipped.
+LISPM_UI ?= ../lispm-ui
 LOAD_PATH = -L . -L $(LISPM_KIT) $(foreach dir,$(WEBSOCKET),-L $(dir)) \
-	$(foreach dir,$(wildcard $(LISPM_AGENT)),-L $(dir))
+	$(foreach dir,$(wildcard $(LISPM_AGENT)),-L $(dir)) \
+	$(foreach dir,$(wildcard $(LISPM_UI)),-L $(dir))
 
 FILES = lispm-comfyui-graph.el lispm-comfyui-prompt.el lispm-comfyui-client.el lispm-comfyui-canvas.el \
 	lispm-comfyui-settings.el lispm-comfyui.el

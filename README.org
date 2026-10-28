@@ -79,8 +79,8 @@ dialogs, in the workflow's window:
 Save keeps them, with Customize, and draws the workflows open anew; Cancel leaves them as they
 were.  The mouse works them as any dialog, and so does the keyboard: =TAB= goes from field to
 field and button to button, =C-c C-c= saves, =C-c C-k= cancels.  When the server does not answer,
-the workflow's window says so, and that =,= opens the settings.  In an Emacs without LispM's
-forms, the settings are Customize's.
+the workflow's window says so, and that =,= opens the settings.  In an Emacs without LispM UI,
+whose forms they are, the settings are Customize's.
 
 On macOS, an application reaches the other machines of the local network only once allowed there,
 in System Settings › Privacy & Security › Local Network.  When macOS keeps LispM off it, a
@@ -133,7 +133,8 @@ speaks to a server: [[file:test/object-info.json][test/object-info.json]] holds 
 subgraphs are made of it in the tests.
 websocket.el is found in package.el's directory, or named by ~WEBSOCKET~; LispM Kit is a checkout
 beside this one, or named by ~LISPM_KIT~.  With LispM Agent's =lisp/= beside this checkout, or
-named by ~LISPM_AGENT~, the tests of the agents' tools run too.
+named by ~LISPM_AGENT~, the tests of the agents' tools run too; with [[https://github.com/LispMachineLab/lispm-ui][LispM UI]] beside it,
+or named by ~LISPM_UI~, those of the settings' form.
 
 * License
 

@@ -641,7 +641,7 @@ workflows were drawn anew onto `redrawn'."
   (lispm-comfyui-test--with-settings lispm-comfyui-test--stats
     (let ((buffer (lispm-comfyui-settings)))
       (with-current-buffer buffer
-        (should (eq major-mode 'lispm-form-mode))
+        (should (derived-mode-p 'lispm-form-mode))
         (should (equal (lispm-form-value 'address) "http://comfy.test:8188"))
         (should (eq (lispm-form-value 'colours) 'dark))
         (should (equal (lispm-form-value 'font) "Sans"))
