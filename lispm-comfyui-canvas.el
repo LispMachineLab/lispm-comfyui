@@ -464,6 +464,23 @@ STATE is a plist of what the canvas shows besides the graph, as
        "")
      "</g>")))
 
+(defun lispm-comfyui-canvas--grid (width height spacing x y colour)
+  "The canvas's dots in COLOUR, SPACING apart from X Y, over WIDTH by HEIGHT.
+They are one path, not an SVG pattern: librsvg takes ten times as long
+to fill the canvas with a pattern, and the canvas is drawn anew at each
+step of a zoom or a drag."
+  (with-temp-buffer
+    (insert (format "<path fill=\"%s\" d=\"" colour))
+    (let ((top y))
+      (while (< top height)
+        (let ((left x))
+          (while (< left width)
+            (insert (format "M%.1f %.1fh2v2h-2z" left top))
+            (setq left (+ left spacing))))
+        (setq top (+ top spacing))))
+    (insert "\"/>")
+    (buffer-string)))
+
 (defun lispm-comfyui-canvas-svg (state width height &optional palette)
   "An SVG, WIDTH by HEIGHT pixels, of what STATE says, a string.
 STATE is a plist: :graph and :types, the graph and its node types;
@@ -489,12 +506,13 @@ colours and :font, `lispm-comfyui-canvas-palette' by default."
      ;; font, which CSS gives the text over an attribute.
      (format "<style>text{font-family:%s}</style>"
              (lispm-comfyui-canvas--escape (plist-get palette :font)))
-     (format "<defs><pattern id=\"grid\" width=\"%.2f\" height=\"%.2f\" patternUnits=\"userSpaceOnUse\" x=\"%.2f\" y=\"%.2f\"><circle cx=\"1\" cy=\"1\" r=\"1\" fill=\"%s\"/></pattern></defs>"
-             grid grid (- (mod (* (car view) scale) grid)) (- (mod (* (cadr view) scale) grid))
-             (plist-get palette :grid))
      (format "<rect width=\"%d\" height=\"%d\" fill=\"%s\"/>" width height
              (plist-get palette :background))
-     (if (> grid 6) (format "<rect width=\"%d\" height=\"%d\" fill=\"url(#grid)\"/>" width height) "")
+     (if (> grid 6)
+         (lispm-comfyui-canvas--grid width height grid
+                                     (- (mod (* (car view) scale) grid)) (- (mod (* (cadr view) scale) grid))
+                                     (plist-get palette :grid))
+       "")
      (format "<g transform=\"scale(%.4f) translate(%.2f %.2f)\">" scale (- (car view)) (- (cadr view)))
      (mapconcat (lambda (group) (or (lispm-comfyui-canvas--group group palette) ""))
                 (lispm-comfyui-graph-groups graph) "")
