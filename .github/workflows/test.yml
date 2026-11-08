@@ -28,6 +28,14 @@ jobs:
         with:
           repository: LispMachineLab/lispm-agent
           path: .deps/lispm-agent
+      - uses: actions/checkout@v7
+        with:
+          repository: LispMachineLab/lispm-auth
+          path: .deps/lispm-auth
+      - uses: actions/checkout@v7
+        with:
+          repository: LispMachineLab/lispm-kernel
+          path: .deps/lispm-kernel
       # LispM UI, whose forms the settings are and whose dialog chooses an
       # image to upload.
       - uses: actions/checkout@v7
@@ -45,6 +53,7 @@ jobs:
           (package-initialize) (package-refresh-contents) (package-install 'websocket))"
       - name: Test
         run: >-
-          make test compile LISPM_AGENT=.deps/lispm-agent/lisp LISPM_KIT=.deps/lispm-kit
-          LISPM_UI=.deps/lispm-ui
+          make test compile LISPM_AGENT=.deps/lispm-agent/lisp
+          LISPM_AUTH=.deps/lispm-auth LISPM_KERNEL=.deps/lispm-kernel/lisp
+          LISPM_KIT=.deps/lispm-kit LISPM_UI=.deps/lispm-ui
           WEBSOCKET=$(ls -d .deps/elpa/websocket-*/)
