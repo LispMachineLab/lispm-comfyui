@@ -9,14 +9,17 @@ WEBSOCKET ?= $(firstword $(wildcard $(HOME)/.emacs.d/elpa/websocket-*))
 # application needs it not; with it on the load path, the tests of the
 # agents' tools run too.
 LISPM_AGENT ?= ../lisp_machine/lisp
-# LispM UI, whose forms the simple view and settings are and whose dialog chooses an
+# LispM UI, whose forms the settings are and whose dialog chooses an
 # image to upload: a checkout beside this one by default.
 LISPM_UI ?= ../lispm-ui
+# LispM Auth and Kernel, which LispM Agent loads when its tools are tested.
+LISPM_AUTH ?= ../lispm-auth
+LISPM_KERNEL ?= ../lispm-kernel/lisp
 LOAD_PATH = -L . -L $(LISPM_KIT) -L $(LISPM_UI) $(foreach dir,$(WEBSOCKET),-L $(dir)) \
-	$(foreach dir,$(wildcard $(LISPM_AGENT)),-L $(dir))
+	$(foreach dir,$(wildcard $(LISPM_AUTH) $(LISPM_KERNEL) $(LISPM_AGENT)),-L $(dir))
 
 FILES = lispm-comfyui-graph.el lispm-comfyui-prompt.el lispm-comfyui-client.el lispm-comfyui-canvas.el \
-	lispm-comfyui-settings.el lispm-comfyui-simple.el lispm-comfyui.el
+	lispm-comfyui-settings.el lispm-comfyui.el
 TOOLS = lispm-comfyui-tools.el
 
 .PHONY: test compile
