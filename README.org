@@ -9,6 +9,8 @@ images it makes shown in it.  The workflows are those of a ComfyUI server's libr
 frontend opens and saves too.  It is an application of [[https://github.com/LispMachineLab/lispm-desktop][LispM Desktop]], which its App Store installs,
 and works in any Emacs 30.1 or later that draws SVG.  In code, the prefix is ~lispm-comfyui-~.
 
+#+HTML: <p align="center"><img src="docs/screenshot.png" alt="A ComfyUI workflow drawn in Emacs, with the server's workflow list on the left and the generated image shown inside Save Image" /></p>
+
 * What it needs
 
 - *A ComfyUI server*, which LispM-ComfyUI is not: ComfyUI itself, run on this machine or another,
