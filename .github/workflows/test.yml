@@ -18,11 +18,6 @@ jobs:
         emacs: ['30.1', '31.1']
     steps:
       - uses: actions/checkout@v7
-      # LispM Kit, with which the window declares its commands.
-      - uses: actions/checkout@v7
-        with:
-          repository: LispMachineLab/lispm-kit
-          path: .deps/lispm-kit
       # The agent whose tools the application adds to, for their tests.
       - uses: actions/checkout@v7
         with:
@@ -36,8 +31,8 @@ jobs:
         with:
           repository: LispMachineLab/lispm-kernel
           path: .deps/lispm-kernel
-      # LispM UI, whose forms the settings are and whose dialog chooses an
-      # image to upload.
+      # LispM UI (including Kit), with which the window declares its commands,
+      # whose forms the settings are, and whose dialog chooses an image to upload.
       - uses: actions/checkout@v7
         with:
           repository: LispMachineLab/lispm-ui
@@ -55,5 +50,5 @@ jobs:
         run: >-
           make test compile LISPM_AGENT=.deps/lispm-agent/lisp
           LISPM_AUTH=.deps/lispm-auth LISPM_KERNEL=.deps/lispm-kernel/lisp
-          LISPM_KIT=.deps/lispm-kit LISPM_UI=.deps/lispm-ui
+          LISPM_UI=.deps/lispm-ui
           WEBSOCKET=$(ls -d .deps/elpa/websocket-*/)
