@@ -152,8 +152,14 @@ prompt, strings, 12:5 for one inside a subgraph, to files.")
 (defvar-local lispm-comfyui--image nil
   "The image last drawn, let go when the next is.")
 
+(defvar-local lispm-comfyui--drawn-size nil
+  "The window size (WIDTH . HEIGHT) at which `lispm-comfyui--image' was drawn.")
+
 (defvar-local lispm-comfyui--timer nil
   "A timer drawing the graph again, or nil.")
+
+(defvar-local lispm-comfyui--inputs-pending 0
+  "How many input images of this workflow are still being fetched.")
 
 (defvar lispm-comfyui--queue-remaining 0
   "How many prompts the server has yet to run.")
@@ -222,7 +228,8 @@ An empty table until the server's are read."
     (setq lispm-comfyui--root root
           lispm-comfyui--path (and graph path)
           lispm-comfyui--graph (or graph root)
-          lispm-comfyui--marked nil)
+          lispm-comfyui--marked nil
+          lispm-comfyui--drawn-size nil)
     (cl-incf lispm-comfyui--tick)))
 
 (defun lispm-comfyui--subgraph-shown ()
@@ -315,19 +322,29 @@ as LoadImage's, which ComfyUI shows in it."
                (let* ((type (if (string-match " \\[\\([a-z]+\\)\\]\\'" value)
                                 (match-string 1 value) "input"))
                       (name (replace-regexp-in-string " \\[[a-z]+\\]\\'" "" value))
-                      (buffer (current-buffer)))
+                      (buffer (current-buffer))
+                      (sync t))
+                 (cl-incf lispm-comfyui--inputs-pending)
                  (lispm-comfyui-fetch-image
                   `((filename . ,(file-name-nondirectory name))
                     (subfolder . ,(or (file-name-directory name) ""))
                     (type . ,type))
                   (lambda (file _error)
                     (when file
-                      (puthash value file lispm-comfyui--inputs-fetched)
-                      (when (buffer-live-p buffer)
-                        (with-current-buffer buffer
-                          (setq lispm-comfyui--layout-state nil)
-                          (lispm-comfyui--draw-soon)))))))
-               nil)))))
+                      (puthash value file lispm-comfyui--inputs-fetched))
+                    (when (buffer-live-p buffer)
+                      (with-current-buffer buffer
+                        (setq lispm-comfyui--inputs-pending
+                              (max 0 (1- lispm-comfyui--inputs-pending)))
+                        (unless sync
+                          (when file
+                            (setq lispm-comfyui--layout-state nil))
+                          (when (and (zerop lispm-comfyui--inputs-pending)
+                                     (null lispm-comfyui--layout-state))
+                            (lispm-comfyui--draw-soon)))))))
+                 (setq sync nil)
+                 (let ((found (gethash value lispm-comfyui--inputs-fetched)))
+                   (and (stringp found) found))))))))
 
 (defun lispm-comfyui--node-image (node types)
   "The image NODE, of TYPES, shows: (FILE WIDTH HEIGHT), or nil.
@@ -426,9 +443,10 @@ input image it loads."
       (set-window-start window (point-min) t)
       ;; Each drawing is an image as large as the window; the last one
       ;; is let go at once, or the image cache would heap them up.
-      (when lispm-comfyui--image
+      (when (and lispm-comfyui--image (not (equal image lispm-comfyui--image)))
         (image-flush lispm-comfyui--image (window-frame window)))
-      (setq lispm-comfyui--image image)))
+      (setq lispm-comfyui--image image
+            lispm-comfyui--drawn-size (cons width height))))
   (force-mode-line-update))
 
 (defun lispm-comfyui--draw-soon ()
@@ -448,7 +466,10 @@ input image it loads."
   (with-current-buffer (window-buffer window)
     (when (derived-mode-p 'lispm-comfyui-mode)
       (with-selected-window window (lispm-comfyui--workflows-ensure))
-      (lispm-comfyui--draw-soon))))
+      (let ((size (cons (max 50 (window-body-width window t))
+                        (max 50 (1- (window-body-height window t))))))
+        (unless (and lispm-comfyui--image (equal size lispm-comfyui--drawn-size))
+          (lispm-comfyui--draw-soon))))))
 
 (defun lispm-comfyui--header ()
   "The header line: the workflow, and what the server or the last run says."
@@ -1660,38 +1681,51 @@ as `lispm-comfyui--runs' holds."
 (defvar-local lispm-comfyui--workflows-open-timer nil
   "The timer ending the wait for a workflow, or nil.")
 
+(defvar-local lispm-comfyui--workflows-drawn nil
+  "The state last drawn in this sidebar.")
+
 (defun lispm-comfyui--workflows-draw ()
   "Draw the library's names, marking the workflow in the main window."
-  (let ((inhibit-read-only t)
-        (chosen (get-text-property (point) 'lispm-comfyui-workflow))
-        (name (when (window-live-p lispm-comfyui--workflows-main)
-                (buffer-local-value 'lispm-comfyui--name
-                                    (window-buffer lispm-comfyui--workflows-main)))))
-    (erase-buffer)
-    (insert "\n  " (propertize "Workflows" 'face 'bold) "\n\n")
-    (when lispm-comfyui--workflows-status
-      (insert "  " (replace-regexp-in-string "[\n\r\t]+" " " lispm-comfyui--workflows-status) "\n"))
-    (dolist (entry lispm-comfyui--workflows-names)
-      (insert (propertize (concat (if (equal name entry) "  • " "    ")
-                                 (replace-regexp-in-string "[\n\r\t]+" " " (file-name-sans-extension entry))
-                                 "\n")
-                          'lispm-comfyui-workflow entry
-                          'mouse-face 'highlight 'help-echo entry
-                          'face (and (equal name entry) 'bold))))
-    (unless (or lispm-comfyui--workflows-status lispm-comfyui--workflows-names)
-      (insert "  No workflows in the library.\n"))
-    (goto-char (point-min))
-    (let ((position nil))
-      (while (and (not (eobp)) (not position))
-        (let ((entry (get-text-property (point) 'lispm-comfyui-workflow)))
-          (when (and entry (equal entry (or chosen name))) (setq position (point))))
-        (forward-line 1))
-      (goto-char (or position (text-property-not-all (point-min) (point-max)
-                                                    'lispm-comfyui-workflow nil)
-                     (point-min))))
-    (dolist (window (get-buffer-window-list (current-buffer) nil t))
-      (set-window-point window (point)))
-    (set-buffer-modified-p nil)))
+  (let* ((inhibit-read-only t)
+         (chosen (get-text-property (point) 'lispm-comfyui-workflow))
+         (name (when (window-live-p lispm-comfyui--workflows-main)
+                 (buffer-local-value 'lispm-comfyui--name
+                                     (window-buffer lispm-comfyui--workflows-main))))
+         (state (list lispm-comfyui--workflows-status lispm-comfyui--workflows-names name)))
+    (unless (and (> (buffer-size) 0) (equal state lispm-comfyui--workflows-drawn))
+      (let ((starts (mapcar (lambda (w)
+                              (cons w (line-number-at-pos (window-start w) t)))
+                            (get-buffer-window-list (current-buffer) nil t))))
+        (setq lispm-comfyui--workflows-drawn state)
+        (erase-buffer)
+        (insert "\n  " (propertize "Workflows" 'face 'bold) "\n\n")
+        (when lispm-comfyui--workflows-status
+          (insert "  " (replace-regexp-in-string "[\n\r\t]+" " " lispm-comfyui--workflows-status) "\n"))
+        (dolist (entry lispm-comfyui--workflows-names)
+          (insert (propertize (concat (if (equal name entry) "  • " "    ")
+                                     (replace-regexp-in-string "[\n\r\t]+" " " (file-name-sans-extension entry))
+                                     "\n")
+                              'lispm-comfyui-workflow entry
+                              'mouse-face (list 'highlight) 'help-echo entry
+                              'face (and (equal name entry) 'bold))))
+        (unless (or lispm-comfyui--workflows-status lispm-comfyui--workflows-names)
+          (insert "  No workflows in the library.\n"))
+        (goto-char (point-min))
+        (let ((position nil))
+          (while (and (not (eobp)) (not position))
+            (let ((entry (get-text-property (point) 'lispm-comfyui-workflow)))
+              (when (and entry (equal entry (or chosen name))) (setq position (point))))
+            (forward-line 1))
+          (goto-char (or position (text-property-not-all (point-min) (point-max)
+                                                        'lispm-comfyui-workflow nil)
+                         (point-min))))
+        (pcase-dolist (`(,window . ,line) starts)
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line (max 0 (1- line)))
+            (set-window-start window (point) t))
+          (set-window-point window (point))))
+      (set-buffer-modified-p nil))))
 
 (defun lispm-comfyui--workflows-cancel ()
   "Discard requests and cancel their timers when this sidebar goes."
@@ -1707,10 +1741,12 @@ as `lispm-comfyui--runs' holds."
   (let ((buffer (current-buffer))
         (server lispm-comfyui-url)
         (request (list t)))
+    (unless (equal server lispm-comfyui--workflows-server)
+      (setq lispm-comfyui--workflows-names nil))
     (setq lispm-comfyui--workflows-request request
           lispm-comfyui--workflows-server server
-          lispm-comfyui--workflows-names nil
-          lispm-comfyui--workflows-status "Reading workflows…")
+          lispm-comfyui--workflows-status
+          (unless lispm-comfyui--workflows-names "Reading workflows…"))
     (lispm-comfyui--workflows-draw)
     (cl-labels ((answer (names error)
                  (when (and (buffer-live-p buffer) (equal server lispm-comfyui-url))
@@ -1800,7 +1836,7 @@ Return its window, or nil if the workflow's window is too narrow."
           (request (list t)))
       (when lispm-comfyui--workflows-open-timer (cancel-timer lispm-comfyui--workflows-open-timer))
       (setq lispm-comfyui--workflows-opening request
-            lispm-comfyui--workflows-status (concat "Opening " name "…"))
+            lispm-comfyui--workflows-status nil)
       (lispm-comfyui--workflows-draw)
       (cl-labels ((current ()
                    (and (buffer-live-p sidebar) (window-live-p main)
@@ -1835,7 +1871,9 @@ Return its window, or nil if the workflow's window is too narrow."
     (dolist (key '("n" "<down>")) (keymap-set map key #'lispm-comfyui-workflows-next))
     (dolist (key '("p" "<up>")) (keymap-set map key #'lispm-comfyui-workflows-previous))
     (keymap-set map "RET" #'lispm-comfyui-workflows-open)
+    (keymap-set map "<down-mouse-1>" #'mouse-set-point)
     (keymap-set map "<mouse-1>" #'lispm-comfyui-workflows-open)
+    (keymap-set map "N" #'lispm-comfyui-new)
     (keymap-set map "g" #'lispm-comfyui-workflows-refresh)
     (keymap-set map "w" #'lispm-comfyui-show-workflows)
     map)
@@ -1858,6 +1896,9 @@ Return its window, or nil if the workflow's window is too narrow."
 
 (defun lispm-comfyui--show (graph name)
   "Show GRAPH, the workflow NAME, in a buffer; return the buffer."
+  (when (and (derived-mode-p 'lispm-comfyui-workflows-mode)
+             (window-live-p lispm-comfyui--workflows-main))
+    (select-window lispm-comfyui--workflows-main))
   (let ((buffer (if (and (derived-mode-p 'lispm-comfyui-mode)
                          (not lispm-comfyui--modified) (null lispm-comfyui--name)
                          (null (lispm-comfyui-graph-nodes lispm-comfyui--root)))
@@ -1865,11 +1906,12 @@ Return its window, or nil if the workflow's window is too narrow."
                   (or (and name (get-buffer (lispm-comfyui--buffer-name name)))
                       (generate-new-buffer (lispm-comfyui--buffer-name name))))))
     (with-current-buffer buffer
-      (unless (derived-mode-p 'lispm-comfyui-mode) (lispm-comfyui-mode))
-      (when (and lispm-comfyui--modified (lispm-comfyui-graph-nodes lispm-comfyui--root)
+      (when (and (derived-mode-p 'lispm-comfyui-mode)
+                 lispm-comfyui--modified (lispm-comfyui-graph-nodes lispm-comfyui--root)
                  (not (yes-or-no-p (format "The workflow %s has changes not saved; let them go? "
                                            (or lispm-comfyui--name "Untitled")))))
         (user-error "Kept as it was"))
+      (unless (derived-mode-p 'lispm-comfyui-mode) (lispm-comfyui-mode))
       (lispm-comfyui--set-root graph)
       (setq lispm-comfyui--name name
             lispm-comfyui--modified nil
@@ -2080,7 +2122,8 @@ A node of it takes their place, linked as they were."
                                  "C-<wheel-up>" "C-<wheel-down>" "C-<mouse-4>" "C-<mouse-5>"))
   (lispm-comfyui-pinch :key "<pinch>")
   :menu "Workflow"
-  (lispm-comfyui-new :key "N" :help "Start a new workflow" :label "New Workflow")
+  (lispm-comfyui-new :key "N" :help "Start a new workflow"
+                     :label "New Workflow" :button "New Workflow")
   (lispm-comfyui-open :key "o" :help "Open a workflow of the server's library"
                       :label "Open…" :button "Open")
   (lispm-comfyui-open-file :key "O" :help "Open a workflow file" :label "Open File…")
