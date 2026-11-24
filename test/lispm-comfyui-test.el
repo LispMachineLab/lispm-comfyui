@@ -1183,6 +1183,105 @@ commands are gone."
                800 600)))
     (should (string-search "Cannot reach the server: , opens Settings" svg))))
 
+(ert-deftest lispm-comfyui-test-empty-canvas-actions ()
+  "An empty workflow draws Add Node… and Open… buttons and hits them on click."
+  (let* ((types (lispm-comfyui-test--types))
+         (graph (lispm-comfyui-graph-create))
+         (svg (lispm-comfyui-canvas-svg
+               (list :graph graph :types types :layout nil :view '(0 0 1.0))
+               800 600)))
+    (should (string-search "An empty workflow: a to add a node, o to open one" svg))
+    (should (string-search ">Add Node…<" svg))
+    (should (string-search ">Open…<" svg))
+    (should (eq (lispm-comfyui-canvas-empty-hit 800 600 340 320) 'add-node))
+    (should (eq (lispm-comfyui-canvas-empty-hit 800 600 450 320) 'open))
+    (should-not (lispm-comfyui-canvas-empty-hit 800 600 400 200))))
+
+(ert-deftest lispm-comfyui-test-add-node-ui ()
+  "Add Node offers a menu of node types, grouped by category, and Search…."
+  (lispm-comfyui-test--with-canvas
+    (let ((menus nil)
+          (prompted nil)
+          (next-choice nil))
+      (cl-letf (((symbol-function 'lispm-ui-popup-available-p) #'always)
+                ((symbol-function 'lispm-ui-menu-choose)
+                 (lambda (items &rest _)
+                   (push items menus)
+                   (if (functionp next-choice)
+                       (funcall next-choice items)
+                     next-choice)))
+                ((symbol-function 'lispm-ui-form-prompt)
+                 (lambda (prompt &rest _)
+                   (setq prompted prompt)
+                   "checkpoint")))
+        ;; Direct selection from menu
+        (setq next-choice '(:label "KSampler" :value "KSampler"))
+        (should (equal (lispm-comfyui--read-type (lispm-comfyui--types) "Add a node: ")
+                       "KSampler"))
+        (should (eq (plist-get (caar menus) :value) :search))
+        ;; Search… narrowing to a single match returns it immediately
+        (setq next-choice '(:label "Search…" :value :search))
+        (should (equal (lispm-comfyui--read-type (lispm-comfyui--types) "Add a node: ")
+                       "CheckpointLoaderSimple"))
+        (should (equal prompted "Add a node: "))))
+    ;; Category tree is built when more than 20 candidates are given
+    (let* ((types (make-hash-table :test #'equal))
+           (candidates nil))
+      (dotimes (i 25)
+        (let ((name (format "Node%d" i)))
+          (puthash name `((name . ,name) (display_name . ,name)
+                          (category . ,(if (< i 12) "model/loaders" "sampling")))
+                   types)
+          (push (cons name name) candidates)))
+      (let ((tree (lispm-comfyui--type-menu-tree types (nreverse candidates))))
+        (should (equal (mapcar (lambda (item) (plist-get item :label)) tree)
+                       '("model" "sampling")))
+        (should (equal (plist-get (car (plist-get (car tree) :submenu)) :label)
+                       "loaders"))))))
+
+(ert-deftest lispm-comfyui-test-open-and-open-file-ui ()
+  "Open offers the library's workflows and Open File… in a menu; Open File…
+uses LispM UI's file dialog."
+  (lispm-comfyui-test--with-canvas
+    (let ((menus nil)
+          (dialogs nil)
+          (shown nil)
+          (workflow-file (expand-file-name "workflow.json" lispm-comfyui-test--directory)))
+      (cl-letf (((symbol-function 'lispm-ui-popup-available-p) #'always)
+                ((symbol-function 'lispm-comfyui-list-workflows)
+                 (lambda (callback) (funcall callback '("alpha.json") nil)))
+                ((symbol-function 'lispm-ui-menu-choose)
+                 (lambda (items &rest _)
+                   (push items menus)
+                   '(:label "Open File…" :value :file)))
+                ((symbol-function 'lispm-comfyui--show)
+                 (lambda (graph name)
+                   (setq shown (cons graph name))
+                   (current-buffer)))
+                (lispm-ui-choose-file-function
+                 (lambda (&rest keys)
+                   (push keys dialogs)
+                   workflow-file)))
+        (call-interactively #'lispm-comfyui-open)
+        (should (= (length menus) 1))
+        (should (equal (plist-get (caar menus) :label) "alpha"))
+        (should (= (length dialogs) 1))
+        (should (equal (plist-get (car dialogs) :title) "Open a Workflow File"))
+        (should (funcall (plist-get (car dialogs) :predicate) "/tmp/demo.json"))
+        (should-not (funcall (plist-get (car dialogs) :predicate) "/tmp/demo.txt"))
+        (should (= (length (lispm-comfyui-graph-nodes (car shown))) 11))))))
+
+(ert-deftest lispm-comfyui-test-title-and-status ()
+  "Title and status report the workflow's name, changes, nodes and run state."
+  (lispm-comfyui-test--with-canvas
+    (should (equal (lispm-comfyui-title) "ComfyUI — Untitled"))
+    (should (equal (lispm-comfyui-status) '("11 nodes")))
+    (setq lispm-comfyui--name "portrait.json"
+          lispm-comfyui--modified t
+          lispm-comfyui--status "Running KSampler")
+    (should (equal (lispm-comfyui-title) "ComfyUI — portrait •"))
+    (should (equal (lispm-comfyui-status) '("11 nodes" "Running KSampler")))))
+
 ;;;; The client
 
 (ert-deftest lispm-comfyui-test-preview-messages ()

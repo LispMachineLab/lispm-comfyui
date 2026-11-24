@@ -485,6 +485,45 @@ STATE is a plist of what the canvas shows besides the graph, as
 (defvar lispm-comfyui-canvas--grid-cache nil
   "The last grid path drawn: ((WIDTH HEIGHT SPACING X Y COLOUR) . SVG).")
 
+(defconst lispm-comfyui-canvas-empty-actions
+  '((add-node "Add Node…" -106 96)
+    (open "Open…" 10 96))
+  "The buttons drawn over an empty workflow: (ACTION LABEL DX WIDTH).
+DX is the button's left offset from the middle of the canvas; its top is
+8 pixels below the middle, and it is 28 pixels tall.")
+
+(defun lispm-comfyui-canvas-empty-hit (width height x y)
+  "The action of the empty workflow's button at X Y in WIDTH by HEIGHT, or nil.
+One of `add-node' or `open'."
+  (let ((cx (/ width 2.0))
+        (top (+ (/ height 2.0) 8.0)))
+    (when (<= top y (+ top 28.0))
+      (cl-loop for (action _label dx w) in lispm-comfyui-canvas-empty-actions
+               for left = (+ cx dx)
+               when (<= left x (+ left w))
+               return action))))
+
+(defun lispm-comfyui-canvas--empty (width height palette)
+  "SVG of an empty workflow's prompt and buttons, in WIDTH by HEIGHT."
+  (let ((cx (/ width 2.0))
+        (cy (/ height 2.0))
+        (top (+ (/ height 2.0) 8.0)))
+    (concat
+     (lispm-comfyui-canvas--text cx (- cy 12.0)
+                                 "An empty workflow: a to add a node, o to open one"
+                                 :fill (plist-get palette :dim)
+                                 :font-size 15 :text-anchor "middle")
+     (mapconcat
+      (pcase-lambda (`(,_ ,label ,dx ,w))
+        (let ((left (+ cx dx)))
+          (concat
+           (format "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"28.0\" rx=\"6\" fill=\"%s\" stroke=\"%s\" stroke-width=\"1\"/>"
+                   left top (float w) (plist-get palette :node) (plist-get palette :border))
+           (lispm-comfyui-canvas--text (+ left (/ w 2.0)) (+ top 18.5) label
+                                       :fill (plist-get palette :text)
+                                       :font-size 13 :text-anchor "middle"))))
+      lispm-comfyui-canvas-empty-actions ""))))
+
 (defun lispm-comfyui-canvas--grid (width height spacing x y colour)
   "The canvas's dots in COLOUR, SPACING apart from X Y, over WIDTH by HEIGHT.
 They are one path, not an SVG pattern: librsvg takes ten times as long
@@ -590,15 +629,16 @@ colours and :font, `lispm-comfyui-canvas-palette' by default."
                       "")))
                 layout "")
      "</g>"
-     (let ((message (or (plist-get state :message)
-                        (unless (lispm-comfyui-graph-nodes graph)
-                          "An empty workflow: a to add a node, o to open one"))))
-       (if (null message) ""
-         (lispm-comfyui-canvas--text (/ width 2.0)
-                                     (if (lispm-comfyui-graph-nodes graph) 28 (/ height 2.0))
-                                     message
-                                     :fill (plist-get palette (if (plist-get state :message) :error :dim))
-                                     :font-size 15 :text-anchor "middle")))
+     (let ((message (plist-get state :message)))
+       (cond (message
+              (lispm-comfyui-canvas--text (/ width 2.0)
+                                          (if (lispm-comfyui-graph-nodes graph) 28 (/ height 2.0))
+                                          message
+                                          :fill (plist-get palette :error)
+                                          :font-size 15 :text-anchor "middle"))
+             ((null (lispm-comfyui-graph-nodes graph))
+              (lispm-comfyui-canvas--empty width height palette))
+             (t "")))
      "</svg>")))
 
 (provide 'lispm-comfyui-canvas)

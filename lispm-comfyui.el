@@ -4,7 +4,7 @@
 
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-comfyui
-;; Version: 0.5.2
+;; Version: 0.5.3
 ;; Package-Requires: ((emacs "30.1") (lispm-ui "0.8.0") (websocket "1.15"))
 ;; Keywords: multimedia, tools
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
@@ -54,6 +54,8 @@
 (require 'subr-x)
 (require 'lispm-kit-commands)
 (require 'lispm-ui-ask)
+(require 'lispm-ui-form)
+(require 'lispm-ui-menu)
 (require 'lispm-comfyui-graph)
 (require 'lispm-comfyui-prompt)
 (require 'lispm-comfyui-client)
@@ -471,17 +473,37 @@ input image it loads."
         (unless (and lispm-comfyui--image (equal size lispm-comfyui--drawn-size))
           (lispm-comfyui--draw-soon))))))
 
+(defun lispm-comfyui--breadcrumbs ()
+  "The subgraphs entered, as ` › NAME', or an empty string."
+  (let ((graph lispm-comfyui--root) (crumbs ""))
+    (dolist (id lispm-comfyui--path crumbs)
+      (let* ((node (and graph (lispm-comfyui-node graph id)))
+             (subgraph (and node (lispm-comfyui-node-subgraph lispm-comfyui--root node))))
+        (setq crumbs (concat crumbs " › " (if subgraph (lispm-comfyui-subgraph-name subgraph) "?"))
+              graph (and subgraph (lispm-comfyui-subgraph-graph subgraph)))))))
+
+(defun lispm-comfyui-title ()
+  "The title of this workflow's window."
+  (concat "ComfyUI — " (file-name-sans-extension (or lispm-comfyui--name "Untitled"))
+          (if lispm-comfyui--modified " •" "")
+          (lispm-comfyui--breadcrumbs)))
+
+(defun lispm-comfyui-status ()
+  "What the bottom of this workflow's window says."
+  (delq nil
+        (list (let ((count (length (lispm-comfyui-graph-nodes lispm-comfyui--graph))))
+                (if (= count 1) "1 node" (format "%d nodes" count)))
+              (and lispm-comfyui--marked (format "%d marked" (length lispm-comfyui--marked)))
+              (cond (lispm-comfyui--status lispm-comfyui--status)
+                    ((> lispm-comfyui--queue-remaining 0)
+                     (format "%d in the server's queue" lispm-comfyui--queue-remaining))))))
+
 (defun lispm-comfyui--header ()
   "The header line: the workflow, and what the server or the last run says."
   (concat
    " " (propertize (or lispm-comfyui--name "Untitled") 'face 'bold)
    (if lispm-comfyui--modified " •" "")
-   (let ((graph lispm-comfyui--root) (crumbs ""))
-     (dolist (id lispm-comfyui--path crumbs)
-       (let* ((node (and graph (lispm-comfyui-node graph id)))
-              (subgraph (and node (lispm-comfyui-node-subgraph lispm-comfyui--root node))))
-         (setq crumbs (concat crumbs " › " (if subgraph (lispm-comfyui-subgraph-name subgraph) "?"))
-               graph (and subgraph (lispm-comfyui-subgraph-graph subgraph))))))
+   (lispm-comfyui--breadcrumbs)
    (format "   %d nodes" (length (lispm-comfyui-graph-nodes lispm-comfyui--graph)))
    (if lispm-comfyui--marked (format ", %d marked" (length lispm-comfyui--marked)) "")
    (cond (lispm-comfyui--status (concat "   " lispm-comfyui--status))
@@ -675,6 +697,31 @@ made to have their subgraphs' inputs after."
     (push (list lispm-comfyui--root lispm-comfyui--path lispm-comfyui--selected) lispm-comfyui--undo)
     (lispm-comfyui--restore step)))
 
+(defun lispm-comfyui--choose (prompt choices &optional current)
+  "Ask PROMPT to choose one of CHOICES, a list of strings or an alist.
+When a popup menu can be drawn, show it with CURRENT checked; otherwise
+read in the minibuffer."
+  (let* ((strings (mapcar (lambda (c) (if (consp c) (car c) c)) choices))
+         (current (and current (member current strings) current)))
+    (if (and (lispm-ui-popup-available-p) (<= 1 (length strings) 30))
+        (let ((chosen (lispm-ui-choose (mapcar (lambda (s) (cons s s)) strings)
+                                       current nil
+                                       (string-trim-right prompt "[ \t]*:?[ \t]*"))))
+          (or (car chosen) (signal 'quit nil)))
+      (completing-read prompt choices nil t nil nil current))))
+
+(defun lispm-comfyui--read-string (prompt &optional initial default)
+  "Ask PROMPT for a string, in a modal dialog when available."
+  (if (lispm-ui-popup-available-p)
+      (let ((lispm-ui-in-gui-action t))
+        (lispm-ui-form-prompt prompt :initial initial :default default))
+    (read-string prompt initial nil default)))
+
+(defun lispm-comfyui--read-number (prompt &optional default)
+  "Ask PROMPT for a number, in a modal dialog when available."
+  (let ((lispm-ui-in-gui-action (or lispm-ui-in-gui-action (lispm-ui-popup-available-p))))
+    (read-number prompt default)))
+
 (defun lispm-comfyui--type-candidates (types &optional predicate)
   "Completion candidates for the node types of TYPES PREDICATE accepts.
 An alist from what is shown, the type's title and name, to the name."
@@ -687,17 +734,111 @@ An alist from what is shown, the type's title and name, to the name."
              types)
     (sort candidates (lambda (a b) (string< (car a) (car b))))))
 
+(defun lispm-comfyui--type-matches-p (name definition words)
+  "Non-nil if the node type NAME, of DEFINITION, matches all WORDS."
+  (let* ((title (or (lispm-comfyui-type-title definition) ""))
+         (category (or (lispm-comfyui--field definition 'category) ""))
+         (description (or (lispm-comfyui--field definition 'description) ""))
+         (aliases (let ((raw (lispm-comfyui--field definition 'search_aliases)))
+                    (if (or (listp raw) (vectorp raw))
+                        (mapconcat (lambda (x) (format "%s" x)) raw " ")
+                      "")))
+         (text (downcase (string-join (list name title category description aliases) " "))))
+    (seq-every-p (lambda (word) (string-search word text)) words)))
+
+(defun lispm-comfyui--type-menu-tree (types candidates)
+  "A hierarchical menu of CANDIDATES, grouped by their category in TYPES."
+  (if (<= (length candidates) 20)
+      (mapcar (pcase-lambda (`(,label . ,name))
+                (list :label label :value name))
+              candidates)
+    (let ((root nil))
+      (cl-labels
+          ((insert-path (tree parts item)
+             (if (null parts)
+                 (append tree (list item))
+               (let* ((part (car parts))
+                      (rest (cdr parts))
+                      (entry (seq-find (lambda (node)
+                                         (and (plist-get node :submenu)
+                                              (equal (plist-get node :label) part)))
+                                       tree)))
+                 (if entry
+                     (progn
+                       (plist-put entry :submenu
+                                  (insert-path (plist-get entry :submenu) rest item))
+                       tree)
+                   (append tree
+                           (list (list :label part
+                                       :submenu (insert-path nil rest item))))))))
+           (sort-tree (tree)
+             (let ((menus nil) (leaves nil))
+               (dolist (node tree)
+                 (if (plist-get node :submenu)
+                     (progn
+                       (plist-put node :submenu (sort-tree (plist-get node :submenu)))
+                       (push node menus))
+                   (push node leaves)))
+               (append (sort menus (lambda (a b)
+                                     (string< (downcase (plist-get a :label))
+                                              (downcase (plist-get b :label)))))
+                       (sort leaves (lambda (a b)
+                                      (string< (downcase (plist-get a :label))
+                                               (downcase (plist-get b :label)))))))))
+        (pcase-dolist (`(,label . ,name) candidates)
+          (let* ((definition (gethash name types))
+                 (category (or (lispm-comfyui--field definition 'category) "other"))
+                 (parts (or (split-string category "/" t "[ \t]+") '("other")))
+                 (title (or (and definition (lispm-comfyui-type-title definition)) label)))
+            (setq root (insert-path root parts (list :label title :value name)))))
+        (sort-tree root)))))
+
+(defun lispm-comfyui--search-type-ui (types prompt candidates)
+  "Search CANDIDATES of TYPES in a modal prompt, then choose in a menu."
+  (let* ((query (let ((lispm-ui-in-gui-action t))
+                  (lispm-ui-form-prompt prompt)))
+         (words (split-string (downcase (or query "")) "[ ,]+" t))
+         (matches (if (null words)
+                      candidates
+                    (seq-filter (pcase-lambda (`(,_ . ,name))
+                                  (when-let* ((def (gethash name types)))
+                                    (lispm-comfyui--type-matches-p name def words)))
+                                candidates))))
+    (cond
+     ((null matches)
+      (user-error "No node type matches %s" query))
+     ((null (cdr matches))
+      (cdar matches))
+     (t
+      (let ((chosen (lispm-ui-menu-choose
+                     (if (<= (length matches) 30)
+                         (mapcar (pcase-lambda (`(,label . ,name))
+                                   (list :label label :value name))
+                                 matches)
+                       (lispm-comfyui--type-menu-tree types matches)))))
+        (or (plist-get chosen :value) (signal 'quit nil)))))))
+
 (defun lispm-comfyui--read-type (types prompt &optional predicate)
   "Read the name of a node type of TYPES PREDICATE accepts, asking PROMPT."
-  (let* ((candidates (lispm-comfyui--type-candidates types predicate))
-         (completion-extra-properties
-          (list :annotation-function
-                (lambda (candidate)
-                  (when-let* ((definition (gethash (cdr (assoc candidate candidates)) types))
-                              (category (lispm-comfyui--field definition 'category)))
-                    (concat "  " (propertize category 'face 'completions-annotations))))))
-         (choice (completing-read prompt candidates nil t)))
-    (or (cdr (assoc choice candidates)) (user-error "No such node type"))))
+  (let ((candidates (lispm-comfyui--type-candidates types predicate)))
+    (unless candidates (user-error "No matching node types"))
+    (if (lispm-ui-popup-available-p)
+        (let* ((items (cons (list :label "Search…" :value :search)
+                            (cons 'separator
+                                  (lispm-comfyui--type-menu-tree types candidates))))
+               (chosen (lispm-ui-menu-choose items))
+               (value (plist-get chosen :value)))
+          (cond ((null chosen) (signal 'quit nil))
+                ((eq value :search) (lispm-comfyui--search-type-ui types prompt candidates))
+                (t value)))
+      (let* ((completion-extra-properties
+              (list :annotation-function
+                    (lambda (candidate)
+                      (when-let* ((definition (gethash (cdr (assoc candidate candidates)) types))
+                                  (category (lispm-comfyui--field definition 'category)))
+                        (concat "  " (propertize category 'face 'completions-annotations))))))
+             (choice (completing-read prompt candidates nil t)))
+        (or (cdr (assoc choice candidates)) (user-error "No such node type"))))))
 
 (defun lispm-comfyui--accepts (definition type)
   "Non-nil if a node of DEFINITION has an input taking TYPE."
@@ -919,9 +1060,9 @@ Nothing is uploaded when none is chosen."
          (value (lispm-comfyui-widget-value widget values)))
     (if control
         (lispm-comfyui--set node (concat name "/control")
-                            (completing-read (format "%s after each run: " name)
-                                             lispm-comfyui-controls nil t nil nil
-                                             (lispm-comfyui-widget-control widget values)))
+                            (lispm-comfyui--choose (format "%s after each run: " name)
+                                                   lispm-comfyui-controls
+                                                   (lispm-comfyui-widget-control widget values)))
       (pcase (plist-get widget :kind)
         ('boolean (lispm-comfyui--set node name (if (memq value '(nil :false)) t :false)))
         ((or 'int 'float)
@@ -929,20 +1070,22 @@ Nothing is uploaded when none is chosen."
                (max (lispm-comfyui-spec-option spec 'max)))
            (lispm-comfyui--set
             node name
-            (read-number (format "%s%s: " name
-                                 (if (or (numberp min) (numberp max))
-                                     (format " (%s to %s)" (or min "") (or max "")) ""))
-                         value))))
+            (lispm-comfyui--read-number
+             (format "%s%s: " name
+                     (if (or (numberp min) (numberp max))
+                         (format " (%s to %s)" (or min "") (or max "")) ""))
+             value))))
         ('string
          (if (lispm-comfyui-spec-option spec 'multiline)
              (lispm-comfyui--edit-text node name value)
-           (lispm-comfyui--set node name (read-string (format "%s: " name) value))))
+           (lispm-comfyui--set node name (lispm-comfyui--read-string (format "%s: " name) value))))
         (_
          (let* ((upload (lispm-comfyui-spec-option spec 'image_upload))
                 (choices (lispm-comfyui-widget-choices spec))
-                (choice (completing-read (format "%s: " name)
-                                         (if upload (cons "Upload a file…" choices) choices)
-                                         nil t nil nil value)))
+                (choice (lispm-comfyui--choose
+                         (format "%s: " name)
+                         (if upload (cons "Upload a file…" choices) choices)
+                         value)))
            (if (and upload (equal choice "Upload a file…"))
                (lispm-comfyui--upload node name)
              (lispm-comfyui--set node name choice))))))))
@@ -955,8 +1098,8 @@ Nothing is uploaded when none is chosen."
          (item (lispm-comfyui--item))
          (name (if (memq (plist-get item :kind) '(widget control))
                    (plist-get item :name)
-                 (completing-read "Set: " (mapcar (lambda (widget) (plist-get widget :name)) widgets)
-                                  nil t)))
+                 (lispm-comfyui--choose "Set: "
+                                        (mapcar (lambda (widget) (plist-get widget :name)) widgets))))
          (widget (seq-find (lambda (widget) (equal (plist-get widget :name) name)) widgets)))
     (unless widget (user-error "The node has no widget %s" name))
     (lispm-comfyui--edit-widget node widget (eq (plist-get item :kind) 'control))))
@@ -1030,7 +1173,7 @@ On a widget, an output is linked to feed it instead of its value."
                       (lispm-comfyui-socket-type (plist-get (plist-get item :widget) :spec))))
               (candidates (or (lispm-comfyui--sources types type node)
                               (user-error "No output gives %s; a adds a node that does" type)))
-              (choice (assoc (completing-read (format "Link %s from: " name) candidates nil t)
+              (choice (assoc (lispm-comfyui--choose (format "Link %s from: " name) candidates)
                              candidates)))
          (lispm-comfyui--change
            (if (eq (nth 1 choice) :new)
@@ -1043,9 +1186,9 @@ On a widget, an output is linked to feed it instead of its value."
        (let* ((type (lispm-comfyui-slot-type (plist-get item :slot)))
               (candidates (or (lispm-comfyui--targets types type node)
                               (user-error "No input takes %s; a adds a node that does" type)))
-              (choice (assoc (completing-read (format "Link %s to: "
-                                                      (lispm-comfyui-slot-name (plist-get item :slot)))
-                                              candidates nil t)
+              (choice (assoc (lispm-comfyui--choose
+                              (format "Link %s to: " (lispm-comfyui-slot-name (plist-get item :slot)))
+                              candidates)
                              candidates)))
          (lispm-comfyui--change
            (if (eq (nth 1 choice) :new)
@@ -1117,17 +1260,19 @@ argument, on a subgraph's node, name the subgraph, all its nodes'."
       (let ((which (pcase (plist-get item :kind)
                      ('output 'input) ('input 'output)
                      (_ (user-error "Choose one of the subgraph's inputs or outputs to name (n and p)")))))
-        (let ((name (read-string "Name: " (lispm-comfyui-slot-name (plist-get item :slot)))))
+        (let ((name (lispm-comfyui--read-string "Name: " (lispm-comfyui-slot-name (plist-get item :slot)))))
           (when (string-blank-p name) (user-error "A name is needed"))
           (lispm-comfyui--change
             (lispm-comfyui-subgraph-rename-slot lispm-comfyui--root (lispm-comfyui--subgraph-shown)
                                                 which (plist-get item :index) name)))))
      ((and subgraph definition)
-      (let ((name (read-string "Name of the subgraph: " (lispm-comfyui-subgraph-name definition))))
+      (let ((name (lispm-comfyui--read-string "Name of the subgraph: "
+                                              (lispm-comfyui-subgraph-name definition))))
         (when (string-blank-p name) (user-error "A name is needed"))
         (lispm-comfyui--change (setf (lispm-comfyui-subgraph-name definition) name))))
      (t
-      (let ((title (read-string "Title: " (lispm-comfyui-node-name node (lispm-comfyui--types)))))
+      (let ((title (lispm-comfyui--read-string "Title: "
+                                               (lispm-comfyui-node-name node (lispm-comfyui--types)))))
         (lispm-comfyui--change
           (setf (lispm-comfyui-node-title node) (if (string-blank-p title) nil title))))))))
 
@@ -1227,7 +1372,7 @@ argument, on a subgraph's node, name the subgraph, all its nodes'."
                                      (lispm-comfyui-node-id node)))
                              (lispm-comfyui-graph-nodes lispm-comfyui--graph))))
     (unless candidates (user-error "The workflow has no nodes"))
-    (lispm-comfyui--select (cdr (assoc (completing-read "Go to node: " candidates nil t) candidates)))))
+    (lispm-comfyui--select (cdr (assoc (lispm-comfyui--choose "Go to node: " candidates) candidates)))))
 
 (defun lispm-comfyui--pan (dx dy)
   "Move the view by DX DY of the window's size."
@@ -1269,11 +1414,24 @@ argument, on a subgraph's node, name the subgraph, all its nodes'."
   (let ((position (posn-x-y (event-start event))))
     (and position (lispm-comfyui--canvas-point position))))
 
+(defun lispm-comfyui--empty-action-at (window position)
+  "The empty workflow's action at pixel POSITION in WINDOW, or nil."
+  (when (and position
+             (null (lispm-comfyui-graph-nodes lispm-comfyui--graph))
+             (lispm-comfyui-cached-types))
+    (let ((size (or lispm-comfyui--drawn-size
+                    (and (window-live-p window)
+                         (cons (max 50 (window-body-width window t))
+                               (max 50 (1- (window-body-height window t)))))
+                    '(800 . 600))))
+      (lispm-comfyui-canvas-empty-hit (car size) (cdr size) (car position) (cdr position)))))
+
 (defun lispm-comfyui-mouse-down (event)
   "Choose what EVENT is on; drag a node to move it, or the canvas to look about."
   (interactive "e")
   (let* ((window (posn-window (event-start event)))
          (start (posn-x-y (event-start event)))
+         (empty-action (lispm-comfyui--empty-action-at window start))
          (point (lispm-comfyui--event-point event))
          (hit (and point (lispm-comfyui-canvas-hit lispm-comfyui--layout (car point) (cdr point))))
          (node (and hit (or (lispm-comfyui-node lispm-comfyui--graph (car hit))
@@ -1284,7 +1442,8 @@ argument, on a subgraph's node, name the subgraph, all its nodes'."
          (selected (car hit))
          (focus (or (cdr hit) 0))
          (moved nil) (last nil))
-    (select-window window)
+    (when (window-live-p window)
+      (select-window window))
     (unless (and (equal lispm-comfyui--selected selected) (eql lispm-comfyui--focus focus))
       (setq lispm-comfyui--selected selected lispm-comfyui--focus focus)
       (lispm-comfyui--draw))
@@ -1314,18 +1473,27 @@ argument, on a subgraph's node, name the subgraph, all its nodes'."
                 (setq lispm-comfyui--view (list (- (car view) dx) (- (cadr view) dy) (nth 2 view))))
               (lispm-comfyui--draw)
               (redisplay))))))
-    (unless (memq (event-basic-type last) '(mouse-1))
+    (if (memq (event-basic-type last) '(mouse-1))
+        (when (and empty-action (not moved))
+          (let ((lispm-ui-in-gui-action t))
+            (pcase empty-action
+              ('add-node (call-interactively #'lispm-comfyui-add-node))
+              ('open (call-interactively #'lispm-comfyui-open)))))
       (push last unread-command-events))))
 
 (defun lispm-comfyui-mouse-double (event)
-  "Do what the item EVENT is on calls for, as RET does."
+  "Do what the item EVENT is on calls for, as RET does.
+On empty canvas, add a node."
   (interactive "e")
   (let* ((point (lispm-comfyui--event-point event))
          (hit (and point (lispm-comfyui-canvas-hit lispm-comfyui--layout (car point) (cdr point)))))
-    (when hit
-      (setq lispm-comfyui--selected (car hit) lispm-comfyui--focus (cdr hit))
-      (lispm-comfyui--draw)
-      (lispm-comfyui-act))))
+    (if hit
+        (progn
+          (setq lispm-comfyui--selected (car hit) lispm-comfyui--focus (cdr hit))
+          (lispm-comfyui--draw)
+          (lispm-comfyui-act))
+      (let ((lispm-ui-in-gui-action t))
+        (call-interactively #'lispm-comfyui-add-node)))))
 
 (defun lispm-comfyui--wheel-buffer (event)
   "The buffer under wheel EVENT, or this buffer for a numeric amount."
@@ -1928,26 +2096,51 @@ Return its window, or nil if the workflow's window is too narrow."
       (lispm-comfyui--draw))
     buffer))
 
+(defun lispm-comfyui--workflow-file-p (file)
+  "Non-nil if FILE is a JSON workflow or prompt file, by its name."
+  (equal (downcase (or (file-name-extension file) "")) "json"))
+
 (defun lispm-comfyui-open (name)
-  "Open the workflow NAME of the server's library."
+  "Open the workflow NAME of the server's library, or `:file' for a local file."
   (interactive
    (list (let ((names nil) (failure nil))
            (lispm-comfyui-list-workflows (lambda (list error) (setq names (or list t) failure error)))
            (with-timeout (30 (user-error "The server at %s did not answer" lispm-comfyui-url))
              (while (not names) (accept-process-output nil 0.05)))
            (when failure (user-error "Cannot list the workflows: %s" failure))
-           (completing-read "Open workflow: " (if (listp names) names nil) nil t))))
-  (lispm-comfyui--need-types)
-  (let ((json nil) (failure nil))
-    (lispm-comfyui-read-workflow name (lambda (value error) (setq json (or value t) failure error)))
-    (with-timeout (30 (user-error "The server at %s did not answer" lispm-comfyui-url))
-      (while (not json) (accept-process-output nil 0.05)))
-    (when failure (user-error "Cannot read %s: %s" name failure))
-    (lispm-comfyui--show (lispm-comfyui-graph-from-json json (lispm-comfyui-cached-types)) name)))
+           (let ((list (and (listp names) names)))
+             (if (lispm-ui-popup-available-p)
+                 (let* ((items (append
+                                (if list
+                                    (mapcar (lambda (entry)
+                                              (list :label (file-name-sans-extension entry)
+                                                    :value entry
+                                                    :checked (equal entry lispm-comfyui--name)))
+                                            list)
+                                  (list (list :label "No workflows in the library" :enabled nil)))
+                                (list 'separator
+                                      (list :label "Open File…" :value :file))))
+                        (chosen (lispm-ui-menu-choose items)))
+                   (or (plist-get chosen :value) (signal 'quit nil)))
+               (if list
+                   (completing-read "Open workflow: " list nil t)
+                 :file))))))
+  (if (eq name :file)
+      (call-interactively #'lispm-comfyui-open-file)
+    (lispm-comfyui--need-types)
+    (let ((json nil) (failure nil))
+      (lispm-comfyui-read-workflow name (lambda (value error) (setq json (or value t) failure error)))
+      (with-timeout (30 (user-error "The server at %s did not answer" lispm-comfyui-url))
+        (while (not json) (accept-process-output nil 0.05)))
+      (when failure (user-error "Cannot read %s: %s" name failure))
+      (lispm-comfyui--show (lispm-comfyui-graph-from-json json (lispm-comfyui-cached-types)) name))))
 
 (defun lispm-comfyui-open-file (file)
   "Open the workflow in FILE, saved by ComfyUI, or a prompt in its API's form."
-  (interactive "fOpen workflow file: ")
+  (interactive
+   (list (or (lispm-ui-choose-file :title "Open a Workflow File"
+                                   :predicate #'lispm-comfyui--workflow-file-p)
+             (signal 'quit nil))))
   (let* ((json (with-temp-buffer
                  (insert-file-contents file)
                  (goto-char (point-min))
@@ -1969,7 +2162,7 @@ Return its window, or nil if the workflow's window is too narrow."
 Without a name, it is asked for the first time."
   (interactive)
   (let* ((name (or name lispm-comfyui--name
-                   (let ((name (read-string "Save workflow as: ")))
+                   (let ((name (lispm-comfyui--read-string "Save workflow as: ")))
                      (when (string-blank-p name) (user-error "A workflow needs a name"))
                      name)))
          (name (if (string-suffix-p ".json" name) name (concat name ".json")))
@@ -1992,9 +2185,10 @@ Without a name, it is asked for the first time."
 (defun lispm-comfyui-save-as ()
   "Save the workflow in the server's library under a name asked for."
   (interactive)
-  (lispm-comfyui-save (read-string "Save workflow as: "
-                                   (and lispm-comfyui--name
-                                        (file-name-sans-extension lispm-comfyui--name)))))
+  (lispm-comfyui-save (lispm-comfyui--read-string
+                       "Save workflow as: "
+                       (and lispm-comfyui--name
+                            (file-name-sans-extension lispm-comfyui--name)))))
 
 (defun lispm-comfyui-reload (&rest _)
   "Read the server's node types again, and draw anew."
@@ -2053,7 +2247,7 @@ What changes there changes in all its subgraph's nodes."
 (defun lispm-comfyui-make-subgraph (name)
   "Make a subgraph, NAME, of the nodes marked, or of the node chosen.
 A node of it takes their place, linked as they were."
-  (interactive (list (read-string "Name of the subgraph: " nil nil "New Subgraph")))
+  (interactive (list (lispm-comfyui--read-string "Name of the subgraph: " nil "New Subgraph")))
   (let* ((types (lispm-comfyui--need-types))
          (nodes (or (delq nil (mapcar (lambda (id) (lispm-comfyui-node lispm-comfyui--graph id))
                                       lispm-comfyui--marked))
