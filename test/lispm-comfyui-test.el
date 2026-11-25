@@ -1411,5 +1411,31 @@ uses LispM UI's file dialog."
         (should (string-search "model: socket of MODEL" text))
         (should (string-search "LATENT: LATENT" text))))))
 
+(ert-deftest lispm-comfyui-test-prompts-and-confirms-use-lispm-ui ()
+  "Number prompts, large choosers, and dirty-workflow confirms use `lispm-ui'."
+  (lispm-comfyui-test--with-canvas
+    (let ((lispm-ui-form-prompt-function (lambda (&rest _) "16")))
+      (should (= (lispm-comfyui--read-number "Steps: " 20) 16)))
+    (let* ((many (mapcar (lambda (i) (format "opt-%02d" i)) (number-sequence 1 35)))
+           (called nil)
+           (lispm-ui-choose-function
+            (lambda (choices &rest _)
+              (setq called (length choices))
+              '("opt-31"))))
+      (should (equal (lispm-comfyui--choose "Choice: " many) "opt-31"))
+      (should (= called 35)))
+    (let* ((alerts nil)
+           (lispm-ui-alert-function
+            (lambda (_icon message buttons _detail)
+              (push (list message (mapcar #'car buttons)) alerts)
+              (nth 1 (seq-find (lambda (b) (eq (nth 2 b) 'cancel)) buttons)))))
+      (rename-buffer (lispm-comfyui--buffer-name "demo.json") t)
+      (setq lispm-comfyui--name "demo.json"
+            lispm-comfyui--modified t)
+      (should-not (lispm-comfyui--may-kill))
+      (should-error (lispm-comfyui--show (lispm-comfyui-graph-create) "demo.json")
+                    :type 'user-error)
+      (should (= (length alerts) 2)))))
+
 (provide 'lispm-comfyui-test)
 ;;; lispm-comfyui-test.el ends here
