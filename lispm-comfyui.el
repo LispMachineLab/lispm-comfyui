@@ -4,8 +4,8 @@
 
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-comfyui
-;; Version: 0.5.3
-;; Package-Requires: ((emacs "30.1") (lispm-ui "0.8.0") (websocket "1.15"))
+;; Version: 0.5.4
+;; Package-Requires: ((emacs "30.1") (lispm-ui "0.12.0") (websocket "1.15"))
 ;; Keywords: multimedia, tools
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -699,28 +699,21 @@ made to have their subgraphs' inputs after."
 
 (defun lispm-comfyui--choose (prompt choices &optional current)
   "Ask PROMPT to choose one of CHOICES, a list of strings or an alist.
-When a popup menu can be drawn, show it with CURRENT checked; otherwise
-read in the minibuffer."
+Delegates to `lispm-ui-choose' with CURRENT checked."
   (let* ((strings (mapcar (lambda (c) (if (consp c) (car c) c)) choices))
-         (current (and current (member current strings) current)))
-    (if (and (lispm-ui-popup-available-p) (<= 1 (length strings) 30))
-        (let ((chosen (lispm-ui-choose (mapcar (lambda (s) (cons s s)) strings)
-                                       current nil
-                                       (string-trim-right prompt "[ \t]*:?[ \t]*"))))
-          (or (car chosen) (signal 'quit nil)))
-      (completing-read prompt choices nil t nil nil current))))
+         (current (and current (member current strings) current))
+         (chosen (lispm-ui-choose (mapcar (lambda (s) (cons s s)) strings)
+                                  current nil
+                                  (string-trim-right prompt "[ \t]*:?[ \t]*"))))
+    (if chosen (car chosen) (signal 'quit nil))))
 
 (defun lispm-comfyui--read-string (prompt &optional initial default)
-  "Ask PROMPT for a string, in a modal dialog when available."
-  (if (lispm-ui-popup-available-p)
-      (let ((lispm-ui-in-gui-action t))
-        (lispm-ui-form-prompt prompt :initial initial :default default))
-    (read-string prompt initial nil default)))
+  "Ask PROMPT for a string with INITIAL and DEFAULT via `lispm-ui-read-string'."
+  (lispm-ui-read-string prompt :initial initial :default default))
 
 (defun lispm-comfyui--read-number (prompt &optional default)
-  "Ask PROMPT for a number, in a modal dialog when available."
-  (let ((lispm-ui-in-gui-action (or lispm-ui-in-gui-action (lispm-ui-popup-available-p))))
-    (read-number prompt default)))
+  "Ask PROMPT for a number with optional DEFAULT via `lispm-ui-read-number'."
+  (lispm-ui-read-number prompt default))
 
 (defun lispm-comfyui--type-candidates (types &optional predicate)
   "Completion candidates for the node types of TYPES PREDICATE accepts.
@@ -2076,8 +2069,10 @@ Return its window, or nil if the workflow's window is too narrow."
     (with-current-buffer buffer
       (when (and (derived-mode-p 'lispm-comfyui-mode)
                  lispm-comfyui--modified (lispm-comfyui-graph-nodes lispm-comfyui--root)
-                 (not (yes-or-no-p (format "The workflow %s has changes not saved; let them go? "
-                                           (or lispm-comfyui--name "Untitled")))))
+                 (not (lispm-ui-confirm
+                       (format "The workflow %s has changes not saved; let them go?"
+                               (or lispm-comfyui--name "Untitled"))
+                       nil "Let Go")))
         (user-error "Kept as it was"))
       (unless (derived-mode-p 'lispm-comfyui-mode) (lispm-comfyui-mode))
       (lispm-comfyui--set-root graph)
@@ -2436,8 +2431,10 @@ w goes to the workflows on the left, and back.
   "Non-nil if this buffer may go: its workflow saved, or let go."
   (or (not lispm-comfyui--modified)
       (null (lispm-comfyui-graph-nodes lispm-comfyui--root))
-      (yes-or-no-p (format "The workflow %s changed since it was saved; close it anyway? "
-                           (or lispm-comfyui--name "Untitled")))))
+      (lispm-ui-confirm
+       (format "The workflow %s changed since it was saved; close it anyway?"
+               (or lispm-comfyui--name "Untitled"))
+       nil "Close")))
 
 ;;;###autoload
 (defun lispm-comfyui ()
